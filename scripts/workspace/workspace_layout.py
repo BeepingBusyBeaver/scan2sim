@@ -36,7 +36,6 @@ DEFAULT_CONFIG = {
         "outputs/label",
         "outputs/obj",
         "data/match_one",
-        "integrations/livehps/overrides",
         "logs",
     ],
     "scan2sim_recommended_cleanup": {

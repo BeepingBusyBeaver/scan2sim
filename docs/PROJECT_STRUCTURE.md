@@ -13,7 +13,6 @@
 - `dataset/`: pose/label definition datasets (json/jsonl)
 - `scripts/`: scan2sim processing utilities (`common`, `data`, `ouster`, `pc`, `conversion`, `labeling`, `infer`, `eval`, `pipeline`, `workspace`)
 - `tests/`: test assets and validation scripts
-- `integrations/livehps/`: upstream reference overrides/snapshots only
 
 ## Path defaults source
 - Canonical CLI input/output defaults are defined in `scripts/common/io_paths.py`.
@@ -27,4 +26,3 @@
 - Upstream LiveHPS code/assets stay in `/home/victus/projects/LiveHPS`.
 - scan2sim interop runtime artifacts are managed under `outputs/`.
 - scan2sim execution scripts are managed under `scripts`.
-- `integrations/livehps` keeps override snapshots for traceability only.

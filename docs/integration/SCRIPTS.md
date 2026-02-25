@@ -4,7 +4,7 @@ LiveHPS-related utilities are merged into scan2sim script groups and exposed thr
 
 - Entry CLI: `python -m scripts <command>`
 - Runtime I/O root: `outputs/`
-- Upstream traceability snapshots: `integrations/livehps/overrides/`
+- Upstream source is referenced from: `../LiveHPS` (not copied into scan2sim)
 
 Canonical pipeline commands:
 - `pcap2pcd`: `raw.pcap -> data/real/raw/*.pcd`

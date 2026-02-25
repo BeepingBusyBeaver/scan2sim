@@ -103,4 +103,3 @@ python -m scripts.eval.match_one \
 ## 8) Related Docs
 - `docs/PROJECT_STRUCTURE.md`
 - `docs/integration/SCRIPTS.md`
-- `integrations/livehps/README.md`
