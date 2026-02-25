@@ -1,0 +1,22 @@
+# scan2sim/pyproject.toml
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scan2sim"
+version = "0.1.0"
+description = "LiDAR-to-SMPL pipeline and tooling built around pretrained LiveHPS."
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["lidar", "smpl", "livehps", "point-cloud", "pipeline"]
+
+[project.scripts]
+scan2sim = "scripts.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scripts", "scripts.*"]

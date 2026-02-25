@@ -1,0 +1,13 @@
+# scan2sim/environment.yml
+name: scan2sim
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip>=25,<26
+  - setuptools>=68
+  - wheel
+  - git
+  - pip:
+      - -r requirements.txt
+      - -r requirements-cu130.txt

@@ -1,0 +1,65 @@
+# Ubuntu 22.04.5 LTS
+
+# 0) sudo 모듈 설치
+sudo apt-get update
+sudo apt-get install -y libgl1 libglib2.0-0 ffmpeg libpcl-dev libeigen3-dev libboost-all-dev libzmq3-dev cmake ninja-build libopenmpi-dev openmpi-bin libpcap-dev libpng-dev freeglut3-dev libgl1-mesa-dev libgl1-mesa-dri libglu1-mesa-dev xorg-dev libglx-mesa0 libegl1-mesa mesa-utils libgl1-mesa-glx libglfw3 libxi6 libxrandr2 libxinerama1 libxcursor1 libglu1-mesa libegl1 libgbm1 avahi-utils avahi-daemon libnss-mdns gdb
+
+# 1) 기존 같은 이름 환경 있으면 제거
+conda deactivate 2>/dev/null || true
+conda env remove -n livehps -y 2>/dev/null || true
+
+# 2) 새 conda 환경 만들고 활성화
+conda create -n livehps -y python=3.10
+conda activate livehps
+
+# 3) 채널은 "이 환경에만" 설정
+conda config --env --add channels pytorch
+conda config --env --add channels nvidia
+conda config --env --add channels conda-forge
+conda config --env --set channel_priority flexible
+
+# 4) PyTorch + CUDA 11.8 (런타임 포함)
+conda install -y pytorch==2.4.* torchvision==0.19.* torchaudio==2.4.* pytorch-cuda=11.8
+
+# 5) 빌드 유틸(사전빌드 쓰므로 nvidiacub 불필요)
+conda install -y -c conda-forge ninja "cmake>=3.26" eigen
+
+# 6) PyTorch3D 사전빌드 (cu118) + iopath
+conda install -y -c pytorch3d -c conda-forge pytorch3d==0.7.8 iopath
+
+# 7) 보조 파이썬 패키지
+# 최신 버전
+python -m pip install --upgrade pip
+python -m pip install -U pip setuptools wheel "ouster-sdk>=0.15"
+python -m pip install fvcore yacs pyyaml termcolor tqdm pyzmq
+python -m pip install --no-deps PyQt5 pyqtgraph glfw
+# 고정 버전
+conda install -c conda-forge "libgcc-ng>=13" "libstdcxx-ng>=13"
+python -m pip install "smplx==0.1.28" "cmake==3.29" "plotly==5.24.*" "dash==2.17.1" "scikit-learn==1.3.*" "joblib<2" "threadpoolctl<4" "addict<3" "configargparse<2" "pyquaternion<1" "pandas==1.5.*" "matplotlib==3.7.*" "nbformat>=5.7,<6" "ipywidgets>=8,<9"
+python -m pip install --no-build-isolation "chumpy==0.70"
+python -m pip install --no-deps "numpy==1.22.4" "scipy==1.10.1" "open3d==0.18.*"
+
+# 8) 검증
+python - <<'PY'
+import torch, importlib
+print("torch:", torch.__version__, "cuda_rt:", torch.version.cuda)
+print("cuda_available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("device:", torch.cuda.get_device_name(0))
+for p in ("pytorch3d","iopath","fvcore"):
+    try:
+        importlib.import_module(p); print(p, "OK")
+    except Exception as e:
+        print(p, "IMPORT FAIL:", e)
+PY
+
+## 검증 결과 콘솔 ## (python 3.10.19)
+# torch: 2.4.1 cuda_rt: 11.8
+# cuda_available: True
+# device: NVIDIA GeForce RTX 2080 Ti
+# pytorch3d OK
+# iopath OK
+# fvcore OK
+################
+
+(livehps) victus@DESKTOP-JFR9QPS:~/projects$ git clone https://github.com/4DVLab/LiveHPS.git

@@ -1,0 +1,9 @@
+# configs/axis_steps.yaml
+order: [Rx, Rz, Lx, Lz, Rk, Lk]
+steps:
+  Rx: [-1, 0, 1]
+  Rz: [-1, 0, 1]
+  Lx: [-1, 0, 1]
+  Lz: [-1, 0, 1]
+  Rk: [0, 1]
+  Lk: [0, 1]

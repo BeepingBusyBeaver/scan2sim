@@ -1,0 +1,58 @@
+# scan2sim/.gitignore
+
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+
+# Python tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Conda
+.conda/
+conda-meta/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime artifacts
+data/
+outputs/
+output/
+logs/
+runs/
+wandb/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+
+# Large local-only datasets
+dataset/WB46656poses10set.jsonl
+
+# OS / Windows metadata
+.DS_Store
+Thumbs.db
+*.Zone.Identifier
