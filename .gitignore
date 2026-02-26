@@ -38,7 +38,7 @@ pip-wheel-metadata/
 *.swo
 
 # Runtime artifacts
-data/
+/data/
 outputs/
 output/
 logs/
