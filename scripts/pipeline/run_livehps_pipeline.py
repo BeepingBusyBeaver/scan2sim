@@ -9,6 +9,7 @@ from typing import List
 
 from scripts.common.io_paths import (
     DATA_INTEROP_EULER_DIR,
+    DATA_INTEROP_FBX_DIR,
     DATA_INTEROP_LABEL_DIR,
     DATA_INTEROP_OBJ_DIR,
     DATA_INTEROP_QUAT_DIR,
@@ -23,6 +24,7 @@ from scripts.common.io_paths import (
 
 """
 python -m scripts.pipeline.run_livehps_pipeline \
+  --blender '/mnt/c/Program Files/Blender Foundation/Blender 4.3/blender.exe' \
   --pcap data/labeling/001/simpleMotion_wonjin.pcap \
   --base SN001 \
   --scan 861 893 929 961 989 \
@@ -30,13 +32,14 @@ python -m scripts.pipeline.run_livehps_pipeline \
          1132 1183 1205 1300 1401 \
          1488 1567 1596 1622 1655 \
          1675 \
-  --raw-dir data/real/ARMmotion/raw \
-  --human-dir data/real/ARMmotion/human \
-  --smpl-dir outputs/ARMmotion/smpl \
-  --obj-dir outputs/ARMmotion/obj \
-  --quat-dir outputs/ARMmotion/quat \
-  --euler-dir outputs/ARMmotion/euler \
-  --label-dir outputs/ARMmotion/label \
+  --raw-dir data/real/spb_dance/raw \
+  --human-dir data/real/spb_dance/human \
+  --smpl-dir outputs/spb_dance/smpl \
+  --obj-dir outputs/spb_dance/obj \
+  --fbx-dir outputs/spb_dance/fbx \
+  --quat-dir outputs/spb_dance/quat \
+  --euler-dir outputs/spb_dance/euler \
+  --label-dir outputs/spb_dance/label \
   --skip-pcap2pcd
 
 
@@ -86,8 +89,10 @@ def validate_no_zone_identifier_args(args: argparse.Namespace) -> None:
         "label_euler_pattern": args.label_euler_pattern,
         "label_quat_pattern": args.label_quat_pattern,
         "obj_dir": args.obj_dir,
+        "fbx_dir": args.fbx_dir,
         "weights": args.weights,
         "rules": args.rules,
+        "blender": args.blender,
     }
     hits = [f"{name}={value}" for name, value in path_like_args.items() if value and contains_zone_identifier(value)]
     if hits:
@@ -132,7 +137,7 @@ def resolve_bg_pcd(root: Path, args: argparse.Namespace, raw_dir: Path) -> Path 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run unified LiveHPS pipeline: pcap2pcd -> pcd2human -> human2smpl -> npz2quat/npz2obj -> quat2unity -> unity2label."
+        description="Run unified LiveHPS pipeline: pcap2pcd -> pcd2human -> human2smpl -> npz2quat/npz2obj/npz2fbx -> quat2unity -> unity2label."
     )
     parser.add_argument("--pcap", type=str, default="", help="Input raw pcap path.")
     parser.add_argument("--scan", type=int, nargs="+", default=None, help="Scan indices for pcap2pcd (e.g. --scan 0 10 20).")
@@ -182,6 +187,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--euler-dir", type=str, default=DATA_INTEROP_EULER_DIR, help="Unity euler json output directory.")
     parser.add_argument("--label-dir", type=str, default=DATA_INTEROP_LABEL_DIR, help="Label json output directory.")
     parser.add_argument("--obj-dir", type=str, default=DATA_INTEROP_OBJ_DIR, help="OBJ output directory.")
+    parser.add_argument("--fbx-dir", type=str, default=DATA_INTEROP_FBX_DIR, help="Rigged FBX output directory.")
     parser.add_argument("--run-tag", type=str, default="", help="Run tag appended to intermediate output prefixes. default: no tag.")
 
     parser.add_argument("--weights", type=str, default="../LiveHPS/save_models/livehps.t7", help="LiveHPS weights path.")
@@ -193,9 +199,18 @@ def parse_args() -> argparse.Namespace:
         dest="batch_per_file",
         action="store_true",
         help=(
-            "Enable per-file batch processing for human2smpl/npz2quat/quat2unity/unity2label. "
-            "Default is off (single sequence mode)."
+            "Enable per-file outputs for human2smpl/npz2quat/quat2unity/unity2label. "
+            "human2smpl inference remains sequence-based by default. "
+            "Default is on."
         ),
+    )
+    parser.add_argument(
+        "--single-sequence",
+        "--no-batch-per-file",
+        "--no_batch_per_file",
+        dest="batch_per_file",
+        action="store_false",
+        help="Disable per-file mode and run single-sequence(full) mode.",
     )
     parser.add_argument("--smpl-pattern", type=str, default=None, help="Input pattern for npz2quat/npz2obj. default: current-run outputs only.")
     parser.add_argument("--quat-pattern", type=str, default=None, help="Input pattern for quat2unity. default: current-run outputs only.")
@@ -223,12 +238,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-pcd2human", action="store_true")
     parser.add_argument("--skip-human2smpl", action="store_true")
     parser.add_argument("--skip-post", action="store_true", help="Skip npz2quat/npz2obj/quat2unity/unity2label.")
+    parser.add_argument("--skip-fbx", action="store_true", help="Skip npz2fbx export.")
 
     parser.add_argument("--python", type=str, default=sys.executable, help="Python executable for subprocess steps.")
+    parser.add_argument("--blender", type=str, default="blender", help="Blender executable path for npz2fbx.")
     parser.add_argument("--dry-run", action="store_true", help="Print commands only.")
     parser.set_defaults(
         pcd2human_bg_icp=True,
         pcd2human_apply_pcd_transform=False,
+        batch_per_file=True,
     )
     return parser.parse_args()
 
@@ -246,6 +264,7 @@ def main() -> None:
     euler_dir = resolve_repo_path(root, args.euler_dir)
     label_dir = resolve_repo_path(root, args.label_dir)
     obj_dir = resolve_repo_path(root, args.obj_dir)
+    fbx_dir = resolve_repo_path(root, args.fbx_dir)
     rules_json = resolve_repo_path(root, args.rules)
     run_tag = args.run_tag.strip()
     run_tag = "".join(char if (char.isalnum() or char in ("-", "_")) else "_" for char in run_tag)
@@ -256,17 +275,20 @@ def main() -> None:
         quat_output_prefix = f"livehps_quaternion_{run_tag}_"
         unity_output_prefix = f"livehps_unity_{run_tag}_"
         label_output_prefix = f"livehps_label_{run_tag}_"
+        fbx_output_prefix = f"livehps_rigged_{run_tag}_"
     else:
         human_output_prefix = "human_"
         smpl_output_prefix = "livehps_smpl_"
         quat_output_prefix = "livehps_quaternion_"
         unity_output_prefix = "livehps_unity_"
         label_output_prefix = "livehps_label_"
+        fbx_output_prefix = "livehps_rigged_"
 
     smpl_single_name = f"{smpl_output_prefix}full.npz"
     quat_single_name = f"{quat_output_prefix}full.json"
     unity_single_name = f"{unity_output_prefix}full.json"
     label_single_name = f"{label_output_prefix}full.json"
+    fbx_single_name = f"{fbx_output_prefix}full.fbx"
     if run_tag:
         obj_single_name = f"livehps_mesh_{run_tag}.obj"
     else:
@@ -605,6 +627,24 @@ def main() -> None:
                     label_cmd,
                 ]
             )
+
+    if not args.skip_fbx:
+        steps.append(
+            [
+                args.python,
+                "-m",
+                "scripts",
+                "npz2fbx",
+                "--input",
+                str(smpl_dir / smpl_pattern),
+                "--output",
+                str(fbx_dir / fbx_single_name),
+                "--device",
+                args.device,
+                "--blender",
+                args.blender,
+            ]
+        )
 
     print(f"[pipeline] root={root}")
     if run_tag:

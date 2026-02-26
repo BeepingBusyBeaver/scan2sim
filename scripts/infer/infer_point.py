@@ -126,9 +126,15 @@ def parse_args():
         "--batch_per_file",
         action="store_true",
         help=(
-            "If --input is a directory, run inference per file and write one npz per input "
-            "(e.g. human_0001.ply -> livehps_smpl_0001.npz)."
+            "If --input is a directory, write one npz per input file "
+            "(e.g. human_0001.ply -> livehps_smpl_0001.npz). "
+            "Inference still runs as a sequence by default for temporal consistency."
         ),
+    )
+    parser.add_argument(
+        "--batch_infer_per_file",
+        action="store_true",
+        help="Legacy mode for --batch_per_file: run model independently per file (disables sequence inference).",
     )
     parser.add_argument(
         "--input_pattern",
@@ -430,13 +436,11 @@ def make_batch_output_name(input_file: Path, output_prefix: str) -> str:
     return f"{output_prefix}{tail}.npz"
 
 
-def run_inference_and_save(
+def run_inference(
     selected_paths,
-    output_path: Path,
     args,
     model,
     device,
-    verbose: bool = True,
 ):
     if len(selected_paths) == 0:
         raise ValueError("selected_paths is empty.")
@@ -548,6 +552,23 @@ def run_inference_and_save(
         "trans_world": pack_single_or_seq(trans_world_seq_legacy),
     })
 
+    return save_dict, t, betas.shape, save_dict["trans"].shape
+
+
+def run_inference_and_save(
+    selected_paths,
+    output_path: Path,
+    args,
+    model,
+    device,
+    verbose: bool = True,
+):
+    save_dict, t, betas_shape, trans_shape = run_inference(
+        selected_paths=selected_paths,
+        args=args,
+        model=model,
+        device=device,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(output_path, **save_dict)
 
@@ -559,10 +580,48 @@ def run_inference_and_save(
             f"legacy_as={args.legacy_as}, unity_pose_mode={args.unity_pose_mode}"
         )
         print(f"legacy pose shape: {save_dict['pose'].shape}")
-        print(f"betas shape: {betas.shape}")
-        print(f"legacy trans shape: {save_dict['trans'].shape}")
+        print(f"betas shape: {betas_shape}")
+        print(f"legacy trans shape: {trans_shape}")
 
-    return t, betas.shape, save_dict["trans"].shape
+    return t, betas_shape, trans_shape
+
+
+def build_frame_save_dict(full_save_dict: dict, frame_idx: int) -> dict:
+    total_frames = int(np.asarray(full_save_dict["num_frames"]).reshape(-1)[0])
+    if frame_idx < 0 or frame_idx >= total_frames:
+        raise IndexError(f"frame_idx out of range: {frame_idx} (total={total_frames})")
+
+    frame_dict = {}
+    for key, value in full_save_dict.items():
+        if not isinstance(value, np.ndarray):
+            frame_dict[key] = value
+            continue
+
+        if key == "pcd_files":
+            frame_dict[key] = np.array([value[frame_idx]])
+            continue
+
+        if key == "num_frames":
+            frame_dict[key] = np.array([1], dtype=np.int32)
+            continue
+
+        if key == "num_points_per_frame" or key == "betas" or key.startswith("meta_"):
+            frame_dict[key] = value.copy()
+            continue
+
+        if "_seq" in key:
+            if value.ndim >= 1 and value.shape[0] == total_frames:
+                frame_dict[key] = value[frame_idx:frame_idx + 1].copy()
+            else:
+                frame_dict[key] = value.copy()
+            continue
+
+        if value.ndim >= 1 and value.shape[0] == total_frames:
+            frame_dict[key] = value[frame_idx].copy()
+        else:
+            frame_dict[key] = value.copy()
+
+    return frame_dict
 
 
 def main():
@@ -592,10 +651,10 @@ def main():
         if not input_path.is_dir():
             raise ValueError("--batch_per_file requires --input to be a directory.")
 
-        if args.frames not in (None, 1):
+        if args.batch_infer_per_file and args.frames not in (None, 1):
             print(
                 "[WARN] --frames is ignored in --batch_per_file mode "
-                "(each file is treated as one frame)."
+                "when --batch_infer_per_file is enabled."
             )
 
         point_paths = collect_point_paths(input_path, pattern=args.input_pattern)
@@ -607,150 +666,94 @@ def main():
 
         batch_out_dir.mkdir(parents=True, exist_ok=True)
 
-        total = len(point_paths)
-        for i, pc_path in enumerate(point_paths, start=1):
+        if args.batch_infer_per_file:
+            total = len(point_paths)
+            for i, pc_path in enumerate(point_paths, start=1):
+                out_name = make_batch_output_name(pc_path, args.output_prefix)
+                out_path = batch_out_dir / out_name
+
+                t, betas_shape, trans_shape = run_inference_and_save(
+                    [pc_path], out_path, args, model, device, verbose=False
+                )
+                print(
+                    f"[{i:04d}/{total:04d}] {pc_path.name} -> {out_path.name} "
+                    f"(frames={t}, betas={betas_shape}, trans={trans_shape})"
+                )
+            print(f"Done. processed={total}, output_dir={batch_out_dir}")
+            return
+
+        selected_paths = select_frame_paths(point_paths, args.frames)
+        full_save_dict, _, _, _ = run_inference(
+            selected_paths=selected_paths,
+            args=args,
+            model=model,
+            device=device,
+        )
+
+        total = len(selected_paths)
+        for i, pc_path in enumerate(selected_paths, start=1):
             out_name = make_batch_output_name(pc_path, args.output_prefix)
             out_path = batch_out_dir / out_name
-
-            t, betas_shape, trans_shape = run_inference_and_save(
-                [pc_path], out_path, args, model, device, verbose=False
-            )
+            frame_save_dict = build_frame_save_dict(full_save_dict, i - 1)
+            np.savez(out_path, **frame_save_dict)
             print(
                 f"[{i:04d}/{total:04d}] {pc_path.name} -> {out_path.name} "
-                f"(frames={t}, betas={betas_shape}, trans={trans_shape})"
+                f"(frames=1, betas={frame_save_dict['betas'].shape}, trans={frame_save_dict['trans'].shape})"
             )
 
-        print(f"Done. processed={total}, output_dir={batch_out_dir}")
+        print(f"Done. processed={total}, output_dir={batch_out_dir}, mode=sequence_inference")
         return
 
-    # --- 기존 동작: 단일 파일 or 디렉터리 전체를 시퀀스로 ---
+    # --- 기본 동작 ---
+    # - 파일 입력: 단일 npz 저장
+    # - 디렉터리 입력: 시계열 1회 추론 + full npz 저장 + 프레임별 npz 분할 저장
     point_paths = collect_point_paths(input_path)
     selected_paths = select_frame_paths(point_paths, args.frames)
-    run_inference_and_save(selected_paths, output_path, args, model, device, verbose=True)
 
-    sampled_frames = []
-    centers = []
-    for pc_path in selected_paths:
-        points = load_points_from_cloud(pc_path)
-        sampled_points, center = preprocess_points(points, args.num_points)
-        sampled_frames.append(sampled_points)
-        centers.append(center)
+    if input_path.is_file():
+        run_inference_and_save(selected_paths, output_path, args, model, device, verbose=True)
+        return
 
-    seq_points = np.stack(sampled_frames, axis=0).astype(np.float32)  # [T,N,3]
-    centers_seq_src = np.stack(centers, axis=0).astype(np.float32)    # [T,3]
-    t = seq_points.shape[0]
-
-    device = choose_device(args.device)
-    model = build_livehps_model(weights_path).to(device)
-    model.eval()
-
-    with torch.no_grad():
-        seq_tensor = torch.from_numpy(seq_points).unsqueeze(0).to(device)  # [1,T,N,3]
-        _, rot_6d, betas, trans = model(seq_tensor.float())
-        rot_6d = rot_6d.reshape(1, t, 24, 6)
-        pose = matrix_to_axis_angle_torch(rotation_6d_to_matrix(rot_6d)).reshape(1, t, 72)
-
-    # source-frame outputs from model
-    pose_seq_src = pose.squeeze(0).cpu().numpy().astype(np.float32)                      # [T,72]
-    betas = betas.squeeze(0).cpu().numpy().astype(np.float32)                             # [10]
-    trans_seq_src = trans.reshape(1, t, 3).squeeze(0).cpu().numpy().astype(np.float32)   # [T,3]
-    trans_world_seq_src = (trans_seq_src + centers_seq_src).astype(np.float32)           # [T,3]
-
-    # unity-frame converted outputs
-    pose_seq_unity = convert_pose_seq72_to_unity(
-        pose_seq_src, args.source_frame, args.unity_pose_mode
-    )                                                                                      # [T,72]
-    trans_seq_unity = convert_vec_seq_to_unity(trans_seq_src, args.source_frame)          # [T,3]
-    centers_seq_unity = convert_vec_seq_to_unity(centers_seq_src, args.source_frame)      # [T,3]
-    trans_world_seq_unity = convert_vec_seq_to_unity(
-        trans_world_seq_src, args.source_frame
-    )                                                                                      # [T,3]
-
-    # choose legacy alias
-    if args.legacy_as == "source":
-        pose_seq_legacy = pose_seq_src
-        trans_seq_legacy = trans_seq_src
-        centers_seq_legacy = centers_seq_src
-        trans_world_seq_legacy = trans_world_seq_src
-        legacy_frame_name = args.source_frame
-    else:
-        pose_seq_legacy = pose_seq_unity
-        trans_seq_legacy = trans_seq_unity
-        centers_seq_legacy = centers_seq_unity
-        trans_world_seq_legacy = trans_world_seq_unity
-        legacy_frame_name = "unity_ruf_lhs"
-
-    # build save dict
-    save_dict = {
-        "betas": betas.astype(np.float32),
-        "pcd_files": np.array([str(path) for path in selected_paths]),
-
-        # metadata
-        "meta_source_frame": np.array(args.source_frame),
-        "meta_target_frame_unity": np.array("unity_ruf_lhs"),
-        "meta_export_coords": np.array(args.export_coords),
-        "meta_legacy_as": np.array(args.legacy_as),
-        "meta_legacy_frame_name": np.array(legacy_frame_name),
-        "meta_rotation_vector_unit": np.array("radian"),
-        "meta_flu_to_unity_C": FLU_TO_UNITY_C.astype(np.float32),
-        "meta_unity_pose_mode": np.array(args.unity_pose_mode),
-        "num_frames": np.array([t], dtype=np.int32),
-        "num_points_per_frame": np.array([args.num_points], dtype=np.int32),
-    }
-
-    # source keys
-    if args.export_coords in ("source", "both"):
-        save_dict.update({
-            "pose_seq_source": pose_seq_src.astype(np.float32),
-            "trans_seq_source": trans_seq_src.astype(np.float32),
-            "centers_seq_source": centers_seq_src.astype(np.float32),
-            "trans_world_seq_source": trans_world_seq_src.astype(np.float32),
-
-            "pose_source": pack_single_or_seq(pose_seq_src),
-            "trans_source": pack_single_or_seq(trans_seq_src),
-            "centers_source": pack_single_or_seq(centers_seq_src),
-            "trans_world_source": pack_single_or_seq(trans_world_seq_src),
-        })
-
-    # unity keys
-    if args.export_coords in ("unity", "both"):
-        save_dict.update({
-            "pose_seq_unity": pose_seq_unity.astype(np.float32),
-            "trans_seq_unity": trans_seq_unity.astype(np.float32),
-            "centers_seq_unity": centers_seq_unity.astype(np.float32),
-            "trans_world_seq_unity": trans_world_seq_unity.astype(np.float32),
-
-            "pose_unity": pack_single_or_seq(pose_seq_unity),
-            "trans_unity": pack_single_or_seq(trans_seq_unity),
-            "centers_unity": pack_single_or_seq(centers_seq_unity),
-            "trans_world_unity": pack_single_or_seq(trans_world_seq_unity),
-        })
-
-    # legacy keys (for backward compatibility / downstream scripts)
-    save_dict.update({
-        "pose_seq": pose_seq_legacy.astype(np.float32),
-        "trans_seq": trans_seq_legacy.astype(np.float32),
-        "centers_seq": centers_seq_legacy.astype(np.float32),
-        "trans_world_seq": trans_world_seq_legacy.astype(np.float32),
-
-        "pose": pack_single_or_seq(pose_seq_legacy),
-        "trans": pack_single_or_seq(trans_seq_legacy),
-        "centers": pack_single_or_seq(centers_seq_legacy),
-        "trans_world": pack_single_or_seq(trans_world_seq_legacy),
-    })
-
+    full_save_dict, t, betas_shape, trans_shape = run_inference(
+        selected_paths=selected_paths,
+        args=args,
+        model=model,
+        device=device,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(output_path, **save_dict)
-
+    np.savez(output_path, **full_save_dict)
     print(f"Saved output: {output_path}")
     print(f"frames={t}, num_points={args.num_points}, device={device.type}")
     print(
         f"source_frame={args.source_frame}, export_coords={args.export_coords}, "
         f"legacy_as={args.legacy_as}, unity_pose_mode={args.unity_pose_mode}"
     )
-    print(f"legacy pose shape: {save_dict['pose'].shape}")
-    print(f"betas shape: {betas.shape}")
-    print(f"legacy trans shape: {save_dict['trans'].shape}")
+    print(f"legacy pose shape: {full_save_dict['pose'].shape}")
+    print(f"betas shape: {betas_shape}")
+    print(f"legacy trans shape: {trans_shape}")
+
+    if args.output_dir is not None:
+        split_out_dir = resolve_repo_path(repo_root, args.output_dir)
+    else:
+        split_out_dir = output_path.parent
+    split_out_dir.mkdir(parents=True, exist_ok=True)
+
+    total = len(selected_paths)
+    for i, pc_path in enumerate(selected_paths, start=1):
+        out_name = make_batch_output_name(pc_path, args.output_prefix)
+        out_path = split_out_dir / out_name
+        frame_save_dict = build_frame_save_dict(full_save_dict, i - 1)
+        np.savez(out_path, **frame_save_dict)
+        print(
+            f"[{i:04d}/{total:04d}] {pc_path.name} -> {out_path.name} "
+            f"(frames=1, betas={frame_save_dict['betas'].shape}, trans={frame_save_dict['trans'].shape})"
+        )
+
+    print(
+        f"Done. processed={total}, output_dir={split_out_dir}, "
+        f"full_npz={output_path.name}, mode=sequence_inference"
+    )
+    return
 
 
 if __name__ == "__main__":

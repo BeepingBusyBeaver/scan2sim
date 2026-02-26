@@ -58,7 +58,7 @@ python -m scripts run-pipeline \
 1. `pcap2pcd`: `raw.pcap -> raw.pcd`
 2. `pcd2human`: `raw.pcd -> human.ply`
 3. `human2smpl`: `human.ply -> livehps_smpl_*.npz`
-4. `npz2quat`, `npz2obj`, `quat2unity`, `unity2label`
+4. `npz2quat`, `npz2obj`, `npz2fbx`, `quat2unity`, `unity2label`
 
 ## 5) Step-by-Step Commands
 ```bash
@@ -79,10 +79,10 @@ python -m scripts human2smpl \
 
 python -m scripts npz2quat --input outputs/smpl --batch_per_file
 python -m scripts npz2obj --input outputs/smpl --output outputs/obj
-blender --background --python scripts/conversion/obj_to_fbx.py -- \
-  --input-glob "outputs/obj/*.obj" \
-  --output "outputs/motion.fbx" \
-  --fps 30
+python -m scripts npz2fbx \
+  --input "outputs/smpl/livehps_smpl_*.npz" \
+  --output outputs/fbx/livehps_rigged_full.fbx \
+  --blender "/mnt/c/Program Files/Blender Foundation/Blender 4.3/blender.exe"
 python -m scripts quat2unity --input outputs/quat --batch_per_file
 python -m scripts unity2label --batch_per_file --euler-json outputs/euler --quat-json outputs/quat
 ```

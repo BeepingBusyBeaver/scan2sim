@@ -75,11 +75,13 @@ _define_paths(
         "DATA_INTEROP_EULER_DIR": ("euler",),
         "DATA_INTEROP_LABEL_DIR": ("label",),
         "DATA_INTEROP_OBJ_DIR": ("obj",),
+        "DATA_INTEROP_FBX_DIR": ("fbx",),
         "DATA_INTEROP_SMPL_JSON": ("smpl", "livehps_smpl.npz"),
         "DATA_INTEROP_QUAT_JSON": ("quat", "livehps_quaternion.json"),
         "DATA_INTEROP_EULER_JSON": ("euler", "livehps_unity.json"),
         "DATA_INTEROP_LABEL_JSON": ("label", "livehps_label.json"),
         "DATA_INTEROP_OBJ_MESH": ("obj", "livehps_mesh.obj"),
+        "DATA_INTEROP_FBX_MOTION": ("fbx", "livehps_rigged.fbx"),
     },
 )
 
