@@ -41,9 +41,9 @@ Examples:
 python -c "import scripts.pc.extract_person as m; print(m.__file__)"
 
 python -m scripts.pc.extract_person \
-  --in "data/real/raw/SN001_*.pcd" \
-  --bg data/real/raw/SN001_bg.pcd \
-  --out_dir data/real/human \
+  --in "data/real/ARMmotion/raw/ARM_*.pcd" \
+  --bg data/real/ARMmotion/raw/ARM_bg.pcd \
+  --out_dir data/real/ARMmotion/human \
   --max_range 4.0 \
   --bg_icp --bg_icp_voxel 0.06 --bg_icp_max_corr 0.12 \
   --bg_thresh 0.05 \

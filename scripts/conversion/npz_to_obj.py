@@ -78,7 +78,7 @@ def parse_args():
         help=(
             "Output path. Single input: .obj path recommended (same as before). "
             "Batch input: treat as output directory (if .obj is given, its parent dir is used). "
-            "Multi-frame NPZ: if output is .obj, files will be exported as <stem>_0000.obj, <stem>_0001.obj ..."
+            "Multi-frame NPZ: if output is .obj, files will be exported as <stem>_000.obj, <stem>_001.obj ..."
         ),
     )
     parser.add_argument(
@@ -163,7 +163,7 @@ def resolve_output_paths(output: Path, num_frames: int, prefix: str):
     if num_frames == 1:
         if output.suffix.lower() == ".obj":
             return [output]
-        return [output / f"{prefix}_0000.obj"]
+        return [output / f"{prefix}_000.obj"]
 
     if output.suffix.lower() == ".obj":
         out_dir = output.parent
@@ -171,7 +171,7 @@ def resolve_output_paths(output: Path, num_frames: int, prefix: str):
     else:
         out_dir = output
         frame_prefix = prefix
-    return [out_dir / f"{frame_prefix}_{index:04d}.obj" for index in range(num_frames)]
+    return [out_dir / f"{frame_prefix}_{index:03d}.obj" for index in range(num_frames)]
 
 
 def load_params(npz_path: Path):
@@ -257,6 +257,8 @@ def derive_mesh_obj_name(npz_path: Path) -> str:
         return "livehps_mesh.obj"
     if stem.startswith("livehps_smpl_"):
         suffix = stem[len("livehps_smpl_"):]
+        if suffix.isdigit():
+            suffix = suffix.zfill(3)
         return f"livehps_mesh_{suffix}.obj"
     if stem.startswith("livehps_smpl"):
         return stem.replace("livehps_smpl", "livehps_mesh", 1) + ".obj"

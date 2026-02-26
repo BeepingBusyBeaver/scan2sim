@@ -21,10 +21,10 @@ python -m scripts.labeling.export_step_jsonl \
 
 Directory mode (full JSONL):
 python -m scripts.labeling.export_step_jsonl \
-  --input outputs/VAR/label \
+  --input outputs/ARMmotion/label \
   --pattern "livehps_label_*.json" \
   --mode full \
-  --output outputs/VAR/label/livehps_label_VAR_full.jsonl
+  --output outputs/ARMmotion/label/livehps_label_ARMmotion_full.jsonl
 
 File mode:
 python -m scripts.labeling.export_step_jsonl \

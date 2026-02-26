@@ -20,6 +20,8 @@ COMMANDS: Dict[str, Tuple[str, str]] = {
     "match-one": ("scripts.eval.match_one", "main"),
     "npz-to-obj": ("scripts.conversion.npz_to_obj", "main"),
     "npz2obj": ("scripts.conversion.npz_to_obj", "main"),
+    "obj-to-fbx": ("scripts.conversion.obj_to_fbx", "main"),
+    "obj2fbx": ("scripts.conversion.obj_to_fbx", "main"),
     "npz-to-quat": ("scripts.conversion.npz_to_quat", "main"),
     "npz2quat": ("scripts.conversion.npz_to_quat", "main"),
     "quat-to-unity": ("scripts.conversion.quat_to_unity", "main"),

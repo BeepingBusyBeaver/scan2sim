@@ -79,6 +79,10 @@ python -m scripts human2smpl \
 
 python -m scripts npz2quat --input outputs/smpl --batch_per_file
 python -m scripts npz2obj --input outputs/smpl --output outputs/obj
+blender --background --python scripts/conversion/obj_to_fbx.py -- \
+  --input-glob "outputs/obj/*.obj" \
+  --output "outputs/motion.fbx" \
+  --fps 30
 python -m scripts quat2unity --input outputs/quat --batch_per_file
 python -m scripts unity2label --batch_per_file --euler-json outputs/euler --quat-json outputs/quat
 ```

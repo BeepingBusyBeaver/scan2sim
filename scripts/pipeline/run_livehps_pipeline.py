@@ -30,14 +30,14 @@ python -m scripts.pipeline.run_livehps_pipeline \
          1132 1183 1205 1300 1401 \
          1488 1567 1596 1622 1655 \
          1675 \
-  --raw-dir data/real/VAR/raw \
-  --human-dir data/real/VAR/human \
-  --smpl-dir outputs/VAR/smpl \
-  --obj-dir outputs/VAR/obj \
-  --quat-dir outputs/VAR/quat \
-  --euler-dir outputs/VAR/euler \
-  --label-dir outputs/VAR/label \
-  --skip-pcap2pcd --skip-pcd2human
+  --raw-dir data/real/ARMmotion/raw \
+  --human-dir data/real/ARMmotion/human \
+  --smpl-dir outputs/ARMmotion/smpl \
+  --obj-dir outputs/ARMmotion/obj \
+  --quat-dir outputs/ARMmotion/quat \
+  --euler-dir outputs/ARMmotion/euler \
+  --label-dir outputs/ARMmotion/label \
+  --skip-pcap2pcd
 
 
 # have raw.pcd(bg+hm.pcd): --skip-pcap2pcd
@@ -60,6 +60,74 @@ def run_step(cmd: List[str], dry_run: bool) -> None:
     if dry_run:
         return
     subprocess.run(cmd, check=True)
+
+
+def contains_zone_identifier(text: str) -> bool:
+    token = str(text).strip().lower()
+    if not token:
+        return False
+    return token.endswith(":zone.identifier") or ".zone.identifier" in token
+
+
+def validate_no_zone_identifier_args(args: argparse.Namespace) -> None:
+    path_like_args = {
+        "pcap": args.pcap,
+        "raw_dir": args.raw_dir,
+        "raw_pattern": args.raw_pattern,
+        "bg_pcd": args.bg_pcd,
+        "human_dir": args.human_dir,
+        "human_pattern": args.human_pattern,
+        "smpl_dir": args.smpl_dir,
+        "smpl_pattern": args.smpl_pattern,
+        "quat_dir": args.quat_dir,
+        "quat_pattern": args.quat_pattern,
+        "euler_dir": args.euler_dir,
+        "label_dir": args.label_dir,
+        "label_euler_pattern": args.label_euler_pattern,
+        "label_quat_pattern": args.label_quat_pattern,
+        "obj_dir": args.obj_dir,
+        "weights": args.weights,
+        "rules": args.rules,
+    }
+    hits = [f"{name}={value}" for name, value in path_like_args.items() if value and contains_zone_identifier(value)]
+    if hits:
+        joined = ", ".join(hits)
+        raise ValueError(f"Blocked Zone.Identifier input in pipeline args: {joined}")
+
+
+def infer_bg_from_raw_pattern(raw_dir: Path, raw_pattern: str | None) -> Path | None:
+    if not raw_pattern:
+        return None
+    pattern_name = Path(str(raw_pattern)).name
+    if "*" not in pattern_name:
+        return None
+    prefix = pattern_name.split("*", 1)[0]
+    if not prefix:
+        return None
+    candidate = (raw_dir / f"{prefix}bg.pcd").resolve()
+    if candidate.exists() and candidate.is_file():
+        return candidate
+    return None
+
+
+def resolve_bg_pcd(root: Path, args: argparse.Namespace, raw_dir: Path) -> Path | None:
+    if args.bg_pcd:
+        return resolve_repo_path(root, args.bg_pcd)
+
+    default_bg = (raw_dir / f"{args.base}_bg.pcd").resolve()
+    if default_bg.exists() and default_bg.is_file():
+        return default_bg
+
+    from_pattern = infer_bg_from_raw_pattern(raw_dir, args.raw_pattern)
+    if from_pattern is not None:
+        return from_pattern
+
+    bg_candidates = sorted(
+        [path.resolve() for path in raw_dir.glob("*_bg.pcd") if path.is_file()]
+    )
+    if len(bg_candidates) == 1:
+        return bg_candidates[0]
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -119,6 +187,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weights", type=str, default="../LiveHPS/save_models/livehps.t7", help="LiveHPS weights path.")
     parser.add_argument("--device", type=str, default="cuda", choices=["auto", "cuda", "cpu"], help="Inference device.")
     parser.add_argument("--num-points", type=int, default=256, help="Point samples per frame for human2smpl.")
+    parser.add_argument(
+        "--batch-per-file",
+        "--batch_per_file",
+        dest="batch_per_file",
+        action="store_true",
+        help=(
+            "Enable per-file batch processing for human2smpl/npz2quat/quat2unity/unity2label. "
+            "Default is off (single sequence mode)."
+        ),
+    )
     parser.add_argument("--smpl-pattern", type=str, default=None, help="Input pattern for npz2quat/npz2obj. default: current-run outputs only.")
     parser.add_argument("--quat-pattern", type=str, default=None, help="Input pattern for quat2unity. default: current-run outputs only.")
     parser.add_argument("--label-euler-pattern", type=str, default=None, help="Euler JSON pattern for unity2label. default: current-run outputs only.")
@@ -128,6 +206,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--rules", type=str, default=DATASET_LABEL_RULES_JSON, help="Rules json for unity2label.")
     parser.add_argument("--label-frame", type=int, default=0, help="Frame index for unity2label.")
+    parser.add_argument(
+        "--label-idx",
+        type=int,
+        default=0,
+        help="idx value for unity2label in single mode (when --batch-per-file is off).",
+    )
     parser.add_argument(
         "--label-joints",
         type=str,
@@ -151,6 +235,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    validate_no_zone_identifier_args(args)
     root = repo_root()
 
     pcap_path = resolve_repo_path(root, args.pcap) if args.pcap else None
@@ -178,6 +263,15 @@ def main() -> None:
         unity_output_prefix = "livehps_unity_"
         label_output_prefix = "livehps_label_"
 
+    smpl_single_name = f"{smpl_output_prefix}full.npz"
+    quat_single_name = f"{quat_output_prefix}full.json"
+    unity_single_name = f"{unity_output_prefix}full.json"
+    label_single_name = f"{label_output_prefix}full.json"
+    if run_tag:
+        obj_single_name = f"livehps_mesh_{run_tag}.obj"
+    else:
+        obj_single_name = "livehps_mesh.obj"
+
     if args.human_pattern is not None:
         human_pattern = args.human_pattern
     elif args.skip_pcd2human:
@@ -187,24 +281,42 @@ def main() -> None:
 
     if args.smpl_pattern is not None:
         smpl_pattern = args.smpl_pattern
+    elif not args.batch_per_file:
+        smpl_pattern = smpl_single_name
     elif args.skip_human2smpl:
         smpl_pattern = "*.npz"
     else:
         smpl_pattern = f"{smpl_output_prefix}*.npz"
 
-    quat_pattern = args.quat_pattern or f"{quat_output_prefix}*.json"
-    label_euler_pattern = args.label_euler_pattern or f"{unity_output_prefix}*.json"
-    label_quat_pattern = args.label_quat_pattern or f"{quat_output_prefix}*.json"
+    if args.quat_pattern is not None:
+        quat_pattern = args.quat_pattern
+    elif not args.batch_per_file:
+        quat_pattern = quat_single_name
+    else:
+        quat_pattern = f"{quat_output_prefix}*.json"
+
+    if args.label_euler_pattern is not None:
+        label_euler_pattern = args.label_euler_pattern
+    elif not args.batch_per_file:
+        label_euler_pattern = unity_single_name
+    else:
+        label_euler_pattern = f"{unity_output_prefix}*.json"
+
+    if args.label_quat_pattern is not None:
+        label_quat_pattern = args.label_quat_pattern
+    elif not args.batch_per_file:
+        label_quat_pattern = quat_single_name
+    else:
+        label_quat_pattern = f"{quat_output_prefix}*.json"
     label_euler_prefix = args.label_euler_prefix if args.label_euler_prefix is not None else unity_output_prefix
     label_quat_prefix = args.label_quat_prefix if args.label_quat_prefix is not None else quat_output_prefix
 
-    default_bg_pcd = raw_dir / f"{args.base}_bg.pcd"
-    if args.bg_pcd:
-        bg_pcd = resolve_repo_path(root, args.bg_pcd)
-    elif default_bg_pcd.exists():
-        bg_pcd = default_bg_pcd
-    else:
-        bg_pcd = None
+    bg_pcd = resolve_bg_pcd(root, args, raw_dir)
+    if (not args.skip_pcd2human) and (not args.no_bg) and bg_pcd is None:
+        raise ValueError(
+            "Background PCD could not be resolved. "
+            "Set --bg-pcd explicitly or pass --no-bg to disable background subtraction."
+        )
 
     steps: List[List[str]] = []
     scan_list = [int(s) for s in (args.scan or [])]
@@ -217,7 +329,16 @@ def main() -> None:
 
     raw_inputs: List[str]
     if args.raw_pattern:
-        raw_inputs = [str(raw_dir / args.raw_pattern)]
+        pattern_matches = sorted(raw_dir.glob(args.raw_pattern))
+        filtered = [
+            path.resolve()
+            for path in pattern_matches
+            if path.is_file()
+            and path.suffix.lower() == ".pcd"
+            and (bg_pcd is None or path.resolve() != bg_pcd.resolve())
+            and not path.stem.lower().endswith("_bg")
+        ]
+        raw_inputs = [str(path) for path in filtered] if filtered else [str(raw_dir / args.raw_pattern)]
     elif not args.skip_pcap2pcd and scan_list:
         raw_inputs = [str(raw_dir / f"{args.base}_{scan_idx:06d}.pcd") for scan_idx in scan_list]
     else:
@@ -314,106 +435,176 @@ def main() -> None:
         steps.append(cmd)
 
     if not args.skip_human2smpl:
-        steps.append(
-            [
-                args.python,
-                "-m",
-                "scripts",
-                "human2smpl",
-                "--input",
-                str(human_dir),
-                "--batch_per_file",
-                "--input_pattern",
-                human_pattern,
-                "--output_dir",
-                str(smpl_dir),
-                "--output_prefix",
-                smpl_output_prefix,
-                "--weights",
-                args.weights,
-                "--device",
-                args.device,
-                "--num_points",
-                str(int(args.num_points)),
-            ]
-        )
-
-    if not args.skip_post:
-        label_cmd = [
+        human2smpl_cmd = [
             args.python,
             "-m",
             "scripts",
-            "unity2label",
-            "--batch_per_file",
-            "--euler-json",
-            str(euler_dir),
-            "--quat-json",
-            str(quat_dir),
-            "--euler-pattern",
-            label_euler_pattern,
-            "--quat-pattern",
-            label_quat_pattern,
-            "--euler-prefix",
-            label_euler_prefix,
-            "--quat-prefix",
-            label_quat_prefix,
-            "--rules",
-            str(rules_json),
-            "--output-dir",
-            str(label_dir),
-            "--output-prefix",
-            label_output_prefix,
-            "--frame",
-            str(int(args.label_frame)),
+            "human2smpl",
+            "--input",
+            str(human_dir),
+            "--weights",
+            args.weights,
+            "--device",
+            args.device,
+            "--num_points",
+            str(int(args.num_points)),
         ]
-        if args.label_joints:
-            label_cmd.extend(["--joints", args.label_joints])
-
-        steps.extend(
-            [
+        if args.batch_per_file:
+            human2smpl_cmd.extend(
                 [
-                    args.python,
-                    "-m",
-                    "scripts",
-                    "npz2quat",
-                    "--input",
+                    "--batch_per_file",
+                    "--input_pattern",
+                    human_pattern,
+                    "--output_dir",
                     str(smpl_dir),
-                    "--batch_per_file",
-                    "--input_pattern",
-                    smpl_pattern,
-                    "--output_dir",
-                    str(quat_dir),
                     "--output_prefix",
-                    quat_output_prefix,
-                ],
-                [
-                    args.python,
-                    "-m",
-                    "scripts",
-                    "npz2obj",
-                    "--input",
-                    str(smpl_dir / smpl_pattern),
-                    "--output",
-                    str(obj_dir),
-                ],
-                [
-                    args.python,
-                    "-m",
-                    "scripts",
-                    "quat2unity",
-                    "--input",
-                    str(quat_dir),
-                    "--batch_per_file",
-                    "--input_pattern",
-                    quat_pattern,
-                    "--output_dir",
-                    str(euler_dir),
-                    "--output_prefix",
-                    unity_output_prefix,
-                ],
-                label_cmd,
+                    smpl_output_prefix,
+                ]
+            )
+        else:
+            human2smpl_cmd.extend(["--output", str(smpl_dir / smpl_pattern)])
+        steps.append(human2smpl_cmd)
+
+    if not args.skip_post:
+        if args.batch_per_file:
+            label_cmd = [
+                args.python,
+                "-m",
+                "scripts",
+                "unity2label",
+                "--batch_per_file",
+                "--euler-json",
+                str(euler_dir),
+                "--quat-json",
+                str(quat_dir),
+                "--euler-pattern",
+                label_euler_pattern,
+                "--quat-pattern",
+                label_quat_pattern,
+                "--euler-prefix",
+                label_euler_prefix,
+                "--quat-prefix",
+                label_quat_prefix,
+                "--rules",
+                str(rules_json),
+                "--output-dir",
+                str(label_dir),
+                "--output-prefix",
+                label_output_prefix,
+                "--frame",
+                str(int(args.label_frame)),
             ]
-        )
+            if args.label_joints:
+                label_cmd.extend(["--joints", args.label_joints])
+
+            steps.extend(
+                [
+                    [
+                        args.python,
+                        "-m",
+                        "scripts",
+                        "npz2quat",
+                        "--input",
+                        str(smpl_dir),
+                        "--batch_per_file",
+                        "--input_pattern",
+                        smpl_pattern,
+                        "--output_dir",
+                        str(quat_dir),
+                        "--output_prefix",
+                        quat_output_prefix,
+                    ],
+                    [
+                        args.python,
+                        "-m",
+                        "scripts",
+                        "npz2obj",
+                        "--input",
+                        str(smpl_dir / smpl_pattern),
+                        "--output",
+                        str(obj_dir),
+                    ],
+                    [
+                        args.python,
+                        "-m",
+                        "scripts",
+                        "quat2unity",
+                        "--input",
+                        str(quat_dir),
+                        "--batch_per_file",
+                        "--input_pattern",
+                        quat_pattern,
+                        "--output_dir",
+                        str(euler_dir),
+                        "--output_prefix",
+                        unity_output_prefix,
+                    ],
+                    label_cmd,
+                ]
+            )
+        else:
+            smpl_single_path = smpl_dir / smpl_pattern
+            quat_single_path = quat_dir / quat_pattern
+            unity_single_path = euler_dir / label_euler_pattern
+            label_single_path = label_dir / label_single_name
+            obj_single_path = obj_dir / obj_single_name
+
+            label_cmd = [
+                args.python,
+                "-m",
+                "scripts",
+                "unity2label",
+                "--euler-json",
+                str(unity_single_path),
+                "--quat-json",
+                str(quat_single_path),
+                "--rules",
+                str(rules_json),
+                "--output",
+                str(label_single_path),
+                "--idx",
+                str(int(args.label_idx)),
+                "--frame",
+                str(int(args.label_frame)),
+            ]
+            if args.label_joints:
+                label_cmd.extend(["--joints", args.label_joints])
+
+            steps.extend(
+                [
+                    [
+                        args.python,
+                        "-m",
+                        "scripts",
+                        "npz2quat",
+                        "--input",
+                        str(smpl_single_path),
+                        "--output",
+                        str(quat_single_path),
+                    ],
+                    [
+                        args.python,
+                        "-m",
+                        "scripts",
+                        "npz2obj",
+                        "--input",
+                        str(smpl_single_path),
+                        "--output",
+                        str(obj_single_path),
+                    ],
+                    [
+                        args.python,
+                        "-m",
+                        "scripts",
+                        "quat2unity",
+                        "--input",
+                        str(quat_single_path),
+                        "--output",
+                        str(unity_single_path),
+                    ],
+                    label_cmd,
+                ]
+            )
 
     print(f"[pipeline] root={root}")
     if run_tag:
