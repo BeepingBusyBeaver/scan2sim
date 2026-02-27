@@ -32,14 +32,14 @@ python -m scripts.pipeline.run_livehps_pipeline \
          1132 1183 1205 1300 1401 \
          1488 1567 1596 1622 1655 \
          1675 \
-  --raw-dir data/real/spb_dance/raw \
-  --human-dir data/real/spb_dance/human \
-  --smpl-dir outputs/spb_dance/smpl \
-  --obj-dir outputs/spb_dance/obj \
-  --fbx-dir outputs/spb_dance/fbx \
-  --quat-dir outputs/spb_dance/quat \
-  --euler-dir outputs/spb_dance/euler \
-  --label-dir outputs/spb_dance/label \
+  --raw-dir data/real/OFFSIDE002/raw \
+  --human-dir data/real/OFFSIDE002/human \
+  --smpl-dir outputs/OFFSIDE002/smpl \
+  --obj-dir outputs/OFFSIDE002/obj \
+  --fbx-dir outputs/OFFSIDE002/fbx \
+  --quat-dir outputs/OFFSIDE002/quat \
+  --euler-dir outputs/OFFSIDE002/euler \
+  --label-dir outputs/OFFSIDE002/label \
   --skip-pcap2pcd
 
 
@@ -157,11 +157,21 @@ def parse_args() -> argparse.Namespace:
         help="Background pcd path for pcd2human. If omitted, tries '<raw-dir>/<base>_bg.pcd'.",
     )
     parser.add_argument("--no-bg", action="store_true", help="Run pcd2human without background subtraction input.")
-    parser.add_argument("--pcd2human-max-range", type=float, default=4.0)
+    parser.add_argument("--pcd2human-max-range", type=float, default=5.0)
     parser.add_argument("--pcd2human-bg-thresh", type=float, default=0.05)
     parser.add_argument("--pcd2human-post-bg-thresh", type=float, default=0.0)
-    parser.add_argument("--pcd2human-cluster-eps", type=float, default=0.012)
-    parser.add_argument("--pcd2human-cluster-min-points", type=int, default=10)
+    parser.add_argument(
+        "--pcd2human-cluster-eps",
+        type=float,
+        default=0.012,
+        help="DBSCAN eps for pcd2human.",
+    )
+    parser.add_argument(
+        "--pcd2human-cluster-min-points",
+        type=int,
+        default=10,
+        help="DBSCAN min_points for pcd2human.",
+    )
     parser.add_argument("--pcd2human-person-xy-max", type=float, default=1.1)
     parser.add_argument("--pcd2human-person-area-max", type=float, default=0.9)
     parser.add_argument("--pcd2human-person-planarity-max", type=float, default=0.8)
@@ -173,6 +183,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pcd2human-bg-icp-max-corr", type=float, default=0.12)
     parser.add_argument("--pcd2human-y-min", type=float, default=-0.9)
     parser.add_argument("--pcd2human-y-max", type=float, default=0.6)
+    parser.add_argument("--pcd2human-z-min", type=float, default=-0.73)
     parser.add_argument("--pcd2human-debug-dir", type=str, default=DATA_INTERIM_DEBUG_EXTRACT_DIR)
     parser.add_argument("--pcd2human-bg-icp", dest="pcd2human_bg_icp", action="store_true")
     parser.add_argument("--no-pcd2human-bg-icp", dest="pcd2human_bg_icp", action="store_false")
@@ -433,10 +444,6 @@ def main() -> None:
             str(float(args.pcd2human_vertical_plane_dist)),
             "--vertical_plane_min_inliers",
             str(int(args.pcd2human_vertical_plane_min_inliers)),
-            "--post_rad_radius",
-            str(float(args.pcd2human_post_rad_radius)),
-            "--post_rad_min_points",
-            str(int(args.pcd2human_post_rad_min_points)),
             "--bg_icp_voxel",
             str(float(args.pcd2human_bg_icp_voxel)),
             "--bg_icp_max_corr",
@@ -445,6 +452,8 @@ def main() -> None:
             str(float(args.pcd2human_y_min)),
             "--y_max",
             str(float(args.pcd2human_y_max)),
+            "--z_min",
+            str(float(args.pcd2human_z_min)),
         ]
         if (not args.no_bg) and (bg_pcd is not None):
             cmd.extend(["--bg", str(bg_pcd)])

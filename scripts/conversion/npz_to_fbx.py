@@ -364,10 +364,10 @@ def parse_python_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--batch_per_file", action="store_true", help="Deprecated. Ignored (FBX is always single sequence).")
     parser.add_argument("--input_pattern", type=str, default="livehps_smpl_*.npz", help="Glob when --input is directory.")
     parser.add_argument("--output_dir", type=str, default=DATA_INTEROP_FBX_DIR, help=argparse.SUPPRESS)
-    parser.add_argument("--output_prefix", type=str, default="livehps_rigged_", help=argparse.SUPPRESS)
+    parser.add_argument("--output_prefix", type=str, default="livehps_motion_", help=argparse.SUPPRESS)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"], help="Device for SMPL precompute.")
     parser.add_argument("--blender", type=str, default="blender", help="Blender executable path.")
-    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--start-frame", type=int, default=1)
     parser.add_argument("--axis-forward", type=str, default="-Z", choices=["X", "Y", "Z", "-X", "-Y", "-Z"])
     parser.add_argument("--axis-up", type=str, default="Y", choices=["X", "Y", "Z", "-X", "-Y", "-Z"])
@@ -437,30 +437,12 @@ def run_blender_worker(argv: Sequence[str]) -> None:
     bpy.context.view_layer.objects.active = arm_obj
     bpy.ops.object.mode_set(mode="EDIT")
 
-    children = {idx: [] for idx in range(len(joint_names))}
-    for idx, parent in enumerate(joint_parents):
-        if parent >= 0:
-            children[parent].append(idx)
-
     edit_bones = {}
     for idx, name in enumerate(joint_names):
         bone = arm_data.edit_bones.new(name)
         head = Vector(rest_joints[idx].tolist())
-        child_ids = children.get(idx, [])
-        if child_ids:
-            child_head = Vector(rest_joints[child_ids[0]].tolist())
-            direction = child_head - head
-        elif joint_parents[idx] >= 0:
-            parent_head = Vector(rest_joints[joint_parents[idx]].tolist())
-            direction = head - parent_head
-        else:
-            direction = Vector((0.0, 1.0, 0.0))
-        if direction.length < 1e-8:
-            direction = Vector((0.0, 1.0, 0.0))
-        direction.normalize()
-        tail = head + direction * 0.05
         bone.head = head
-        bone.tail = tail
+        bone.tail = head + Vector((0.0, 0.05, 0.0))
         bone.roll = 0.0
         edit_bones[idx] = bone
 
