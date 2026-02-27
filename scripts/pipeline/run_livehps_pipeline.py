@@ -32,14 +32,14 @@ python -m scripts.pipeline.run_livehps_pipeline \
          1132 1183 1205 1300 1401 \
          1488 1567 1596 1622 1655 \
          1675 \
-  --raw-dir data/real/OFFSIDE002/raw \
-  --human-dir data/real/OFFSIDE002/human \
-  --smpl-dir outputs/OFFSIDE002/smpl \
-  --obj-dir outputs/OFFSIDE002/obj \
-  --fbx-dir outputs/OFFSIDE002/fbx \
-  --quat-dir outputs/OFFSIDE002/quat \
-  --euler-dir outputs/OFFSIDE002/euler \
-  --label-dir outputs/OFFSIDE002/label \
+  --raw-dir data/real/OFFSIDE001/raw \
+  --human-dir data/real/OFFSIDE001/human \
+  --smpl-dir outputs/OFFSIDE001/smpl \
+  --obj-dir outputs/OFFSIDE001/obj \
+  --fbx-dir outputs/OFFSIDE001/fbx \
+  --quat-dir outputs/OFFSIDE001/quat \
+  --euler-dir outputs/OFFSIDE001/euler \
+  --label-dir outputs/OFFSIDE001/label \
   --skip-pcap2pcd
 
 
@@ -244,6 +244,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated joints for unity2label. If omitted, uses classify_label.py default.",
     )
+    parser.add_argument(
+        "--npz2quat-pre-flip-yz",
+        dest="npz2quat_pre_flip_yz",
+        action="store_true",
+        help="Apply --pre_flip_yz when running npz2quat (default: on).",
+    )
+    parser.add_argument(
+        "--no-npz2quat-pre-flip-yz",
+        dest="npz2quat_pre_flip_yz",
+        action="store_false",
+        help="Do not apply --pre_flip_yz when running npz2quat.",
+    )
 
     parser.add_argument("--skip-pcap2pcd", action="store_true")
     parser.add_argument("--skip-pcd2human", action="store_true")
@@ -258,6 +270,7 @@ def parse_args() -> argparse.Namespace:
         pcd2human_bg_icp=True,
         pcd2human_apply_pcd_transform=False,
         batch_per_file=True,
+        npz2quat_pre_flip_yz=True,
     )
     return parser.parse_args()
 
@@ -544,6 +557,7 @@ def main() -> None:
                         str(quat_dir),
                         "--output_prefix",
                         quat_output_prefix,
+                        *(["--pre_flip_yz"] if args.npz2quat_pre_flip_yz else []),
                     ],
                     [
                         args.python,
@@ -612,6 +626,7 @@ def main() -> None:
                         str(smpl_single_path),
                         "--output",
                         str(quat_single_path),
+                        *(["--pre_flip_yz"] if args.npz2quat_pre_flip_yz else []),
                     ],
                     [
                         args.python,
