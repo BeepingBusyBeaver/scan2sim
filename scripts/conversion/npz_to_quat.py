@@ -200,9 +200,43 @@ def rotvec_seq_to_quat_seq(
 ) -> np.ndarray:
     """
     [T,24,3] rotvec(rad) -> [T,24,4] quat(x,y,z,w)
-    - canonical: w>=0 정규화(가능한 경우)
+    - canonical: w>=0 정규화 + (w==0일 때 x/y/z 사전식 tie-break)
     - continuous: 프레임간 부호 튐 완화(q와 -q는 동일 회전)
     """
+
+    def canonicalize_sign_with_tie_break(quat_xyzw: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+        """
+        Deterministic canonical sign:
+          1) w > 0 우선
+          2) w == 0이면 x, y, z 순서로 첫 non-zero가 양수가 되도록 선택
+        """
+        q = np.asarray(quat_xyzw, dtype=np.float32).copy()
+        flat = q.reshape(-1, 4)
+
+        w = flat[:, 3]
+        x = flat[:, 0]
+        y = flat[:, 1]
+        z = flat[:, 2]
+
+        w_neg = w < -eps
+        w_zero = np.abs(w) <= eps
+
+        x_neg = x < -eps
+        x_zero = np.abs(x) <= eps
+        y_neg = y < -eps
+        y_zero = np.abs(y) <= eps
+        z_neg = z < -eps
+
+        tie_flip = w_zero & (
+            x_neg
+            | (x_zero & y_neg)
+            | (x_zero & y_zero & z_neg)
+        )
+
+        flip_mask = w_neg | tie_flip
+        flat[flip_mask] *= -1.0
+        return flat.reshape(q.shape)
+
     T, J, _ = rotvec_seq.shape
     r = R.from_rotvec(rotvec_seq.reshape(-1, 3))
 
@@ -211,18 +245,21 @@ def rotvec_seq_to_quat_seq(
         quat = r.as_quat(canonical=canonical).astype(np.float32)
     except TypeError:
         quat = r.as_quat().astype(np.float32)
-        if canonical:
-            sign = np.where(quat[:, 3:4] < 0.0, -1.0, 1.0).astype(np.float32)
-            quat *= sign
+    if canonical:
+        quat = canonicalize_sign_with_tie_break(quat)
 
     quat = quat.reshape(T, J, 4)
 
     # q와 -q 동치 특성 때문에 시퀀스에서 부호 점프 방지
     if continuous and T > 1:
+        eps = 1e-8
         for j in range(J):
             for t in range(1, T):
-                if np.dot(quat[t - 1, j], quat[t, j]) < 0.0:
+                dot = float(np.dot(quat[t - 1, j], quat[t, j]))
+                if dot < -eps:
                     quat[t, j] *= -1.0
+                elif canonical and abs(dot) <= eps:
+                    quat[t, j] = canonicalize_sign_with_tie_break(quat[t, j])
 
     return quat.astype(np.float32)
 
