@@ -34,10 +34,10 @@ mismatch 거리 계산(기본값 경로 사용):
 
 필요시 명시:
 python -m scripts.labeling.compare_step_labels \
-  --pred-dir outputs/label \
+  --pred-dir outputs/VAR001/label \
   --pred-pattern 'livehps_label_*.json' \
   --gt-jsonl dataset/real_IMU_GT.jsonl \
-  --unity-dir outputs/euler \
+  --unity-dir outputs/VAR001/euler \
   --unity-pattern 'livehps_unity_*.json' \
   --rules-json dataset/label_rules.json \
   --show-key-order \
@@ -47,7 +47,7 @@ python -m scripts.labeling.compare_step_labels \
 
 OX 문자열의 key 순서까지 함께 보고 싶다면:
 python -m scripts.labeling.compare_step_labels \
-  --pred-dir outputs/label \
+  --pred-dir outputs/VAR001/label \
   --pred-pattern 'livehps_label_*.json' \
   --gt-jsonl dataset/real_IMU_GT.jsonl \
   --show-key-order

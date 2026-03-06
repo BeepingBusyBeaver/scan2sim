@@ -66,9 +66,10 @@ HIP_X = [
     Bin(0,   -20.0,  10.0),
     Bin(1,    10.0,  30.0, closed_hi=True),
 ]
-HIP_Z = [
-    Bin(1,  -45.0, -20.0, closed_hi=True),
-    Bin(0,  -20.0,   0.0,),
+LEFT_HIP_Z = [
+    Bin(-1, -45.0, -30.0),
+    Bin(0,  -30.0, -15.0),
+    Bin(1,  -15.0,   0.0, closed_hi=True),
 ]
 
 ELBOW_Y = [
@@ -104,9 +105,9 @@ def map_all_bins(row: pd.Series) -> Dict[str, int]:
 
     # hips (x,z)
     mapped["right_hip_x"] = pick_bin(f(row, "right_hip_x"), HIP_X, "right_hip_x")
-    mapped["right_hip_z"] = pick_bin(f(row, "right_hip_z"), HIP_Z, "right_hip_z (sign-flipped)")
+    mapped["right_hip_z"] = pick_bin(f(row, "right_hip_z"), LEFT_HIP_Z, "right_hip_z (sign-flipped)")
     mapped["left_hip_x"] = pick_bin(f(row, "left_hip_x"), HIP_X, "left_hip_x")
-    mapped["left_hip_z"] = pick_bin(f(row, "left_hip_z"), HIP_Z, "left_hip_z")
+    mapped["left_hip_z"] = pick_bin(f(row, "left_hip_z"), LEFT_HIP_Z, "left_hip_z")
 
     # knees (x)
     mapped["right_knee_x"] = pick_bin(f(row, "right_knee_x"), KNEE_X, "right_knee_x")

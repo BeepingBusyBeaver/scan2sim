@@ -4,9 +4,18 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List
 
-import numpy as np
-from scipy.spatial.transform import Rotation as R
-from scripts.common.angle_utils import wrap180
+from scripts.common.coord_utils import (
+    FRAME_OUSTER_FLU_RHS,
+    FRAME_UNITY_RUF_LHS,
+    SUPPORTED_SOURCE_FRAMES,
+    infer_source_frame_from_meta,
+    quat_xyzw_to_inspector_xyz_deg,
+    source_quat_xyzw_to_unity_inspector_xyz_deg,
+)
+from scripts.common.livehps_defaults import (
+    PIPELINE_DEFAULT_SOURCE_FRAME,
+    QUAT2UNITY_DEFAULT_BASIS_CONVERSION,
+)
 from scripts.common.json_utils import read_json, write_json
 from scripts.common.path_utils import natural_key_path
 from scripts.common.io_paths import (
@@ -17,6 +26,8 @@ from scripts.common.io_paths import (
 )
 
 """
+
+ROOT_JOINT_CANDIDATES = {"pelvis", "root", "hips"}
 Single:
 python -m scripts.conversion.quat_to_unity \
   --input outputs/quat/livehps_quaternion_virtual.json \
@@ -31,45 +42,78 @@ python -m scripts.conversion.quat_to_unity \
   --output_prefix "livehps_unity_"
 """
 
-def quat_dict_to_unity_xyz_deg(qd: Dict[str, Any]) -> Dict[str, float]:
-    """
-    입력 quat은 xyzw.
-    Unity Euler 순서(ZXY)에 맞춰 추출:
-      zxy = as_euler("zxy", degrees=True) -> [z, x, y]
-      출력 xyz는 각각 [x=zxy[1], y=zxy[2], z=zxy[0]]
-    """
+def quat_dict_to_xyzw(qd: Dict[str, Any]) -> List[float]:
     required = ("x", "y", "z", "w")
     if not isinstance(qd, dict):
         raise TypeError(f"Quaternion entry must be dict, got {type(qd)}")
     for k in required:
         if k not in qd:
             raise KeyError(f"Quaternion dict missing key '{k}'")
-
-    q = np.array([qd["x"], qd["y"], qd["z"], qd["w"]], dtype=np.float64)
-    n = float(np.linalg.norm(q))
-    if n <= 1e-12:
-        raise ValueError("Invalid quaternion: norm is zero.")
-    q /= n  # 안전하게 정규화
-
-    zxy = R.from_quat(q).as_euler("zxy", degrees=True)
-    x_deg = wrap180(float(zxy[1]))
-    y_deg = wrap180(float(zxy[2]))
-    z_deg = wrap180(float(zxy[0]))
-
-    return {"x": x_deg, "y": y_deg, "z": z_deg}
+    return [float(qd["x"]), float(qd["y"]), float(qd["z"]), float(qd["w"])]
 
 
-def convert_one_frame(joint_quat_xyzw: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
+def quat_dict_to_inspector_xyz_deg(
+    qd: Dict[str, Any],
+    source_frame: str,
+    apply_basis_conversion: bool,
+) -> Dict[str, float]:
+    """
+    Source quaternion(xyzw) -> Unity 좌표계 변환 ->
+    Unity Inspector Rotation XYZ(Local) 기준 각도.
+    """
+    quat_xyzw = quat_dict_to_xyzw(qd)
+    if apply_basis_conversion:
+        xyz_deg = source_quat_xyzw_to_unity_inspector_xyz_deg(
+            quat_xyzw,
+            source_frame=source_frame,
+        )
+    else:
+        xyz_deg = quat_xyzw_to_inspector_xyz_deg(quat_xyzw)
+    return {
+        "x": float(xyz_deg[0]),
+        "y": float(xyz_deg[1]),
+        "z": float(xyz_deg[2]),
+    }
+
+
+def convert_one_frame(
+    joint_quat_xyzw: Dict[str, Any],
+    source_frame: str,
+    basis_conversion: str,
+) -> Dict[str, Dict[str, float]]:
     if not isinstance(joint_quat_xyzw, dict):
         raise TypeError(f"Frame must be dict[joint_name -> quat], got {type(joint_quat_xyzw)}")
+    if basis_conversion not in {"none", "root_only", "all"}:
+        raise ValueError(f"Unsupported basis_conversion: {basis_conversion}")
 
     out: Dict[str, Dict[str, float]] = {}
     for jname, qd in joint_quat_xyzw.items():
-        out[jname] = quat_dict_to_unity_xyz_deg(qd)
+        if basis_conversion == "none":
+            use_basis_conversion = False
+        elif basis_conversion == "all":
+            use_basis_conversion = True
+        else:
+            use_basis_conversion = str(jname).strip().lower() in ROOT_JOINT_CANDIDATES
+        out[jname] = quat_dict_to_inspector_xyz_deg(
+            qd,
+            source_frame=source_frame,
+            apply_basis_conversion=use_basis_conversion,
+        )
     return out
 
 
-def convert_payload(data: Dict[str, Any], keep_pcd_files: bool = True) -> Dict[str, Any]:
+def infer_source_frame(data: Dict[str, Any], source_frame_arg: str) -> str:
+    if source_frame_arg != "auto":
+        return source_frame_arg
+    return infer_source_frame_from_meta(data.get("meta"), fallback=FRAME_OUSTER_FLU_RHS)
+
+
+def convert_payload(
+    data: Dict[str, Any],
+    source_frame: str,
+    basis_conversion: str,
+    keep_pcd_files: bool = True,
+) -> Dict[str, Any]:
     """
     입력 JSON에서
       - joint_quat_xyzw_seq (다중 프레임) 또는
@@ -81,16 +125,36 @@ def convert_payload(data: Dict[str, Any], keep_pcd_files: bool = True) -> Dict[s
         if not isinstance(frames, list):
             raise TypeError("joint_quat_xyzw_seq는 list여야 합니다.")
         payload: Dict[str, Any] = {
-            "joint_euler_xyz_deg_seq": [convert_one_frame(frame) for frame in frames]
+            "joint_euler_xyz_deg_seq": [
+                convert_one_frame(
+                    frame,
+                    source_frame=source_frame,
+                    basis_conversion=basis_conversion,
+                )
+                for frame in frames
+            ]
         }
 
     elif "joint_quat_xyzw" in data:
         payload = {
-            "joint_euler_xyz_deg": convert_one_frame(data["joint_quat_xyzw"])
+            "joint_euler_xyz_deg": convert_one_frame(
+                data["joint_quat_xyzw"],
+                source_frame=source_frame,
+                basis_conversion=basis_conversion,
+            )
         }
 
     else:
         raise KeyError("joint_quat_xyzw 또는 joint_quat_xyzw_seq 키가 없습니다.")
+
+    payload["meta"] = {
+        "source_frame": source_frame,
+        "target_frame": FRAME_UNITY_RUF_LHS,
+        "euler_order": "zxy",
+        "euler_range_deg": "[0, 360)",
+        "rotation_target": "unity_inspector_rotation_xyz_local",
+        "basis_conversion": basis_conversion,
+    }
 
     if keep_pcd_files and "pcd_files" in data:
         pcd_files = data["pcd_files"]
@@ -171,6 +235,23 @@ def parse_args():
         default="livehps_unity_",
         help="Output filename prefix in batch mode.",
     )
+    parser.add_argument(
+        "--source-frame",
+        type=str,
+        default=PIPELINE_DEFAULT_SOURCE_FRAME,
+        choices=["auto", *SUPPORTED_SOURCE_FRAMES],
+        help=f"Quaternion source frame. 'auto' reads payload meta and falls back to {FRAME_OUSTER_FLU_RHS}.",
+    )
+    parser.add_argument(
+        "--basis-conversion",
+        type=str,
+        default=QUAT2UNITY_DEFAULT_BASIS_CONVERSION,
+        choices=["none", "root_only", "all"],
+        help=(
+            "Before Unity Inspector Euler conversion, apply source->Unity basis conversion to "
+            "none (recommended for SMPL local joint rotations), root_only, or all joints."
+        ),
+    )
 
     # JSON formatting
     parser.add_argument("--ascii", action="store_true", help="JSON ASCII escape")
@@ -209,7 +290,13 @@ def main():
             dst = out_dir / dst_name
 
             data = read_json(src)
-            payload = convert_payload(data, keep_pcd_files=not args.no_pcd_files)
+            source_frame = infer_source_frame(data, source_frame_arg=args.source_frame)
+            payload = convert_payload(
+                data,
+                source_frame=source_frame,
+                basis_conversion=args.basis_conversion,
+                keep_pcd_files=not args.no_pcd_files,
+            )
             write_json(dst, payload, ascii_flag=args.ascii, compact=args.compact)
 
             if "joint_euler_xyz_deg_seq" in payload:
@@ -219,7 +306,10 @@ def main():
                 frames = 1
                 out_key = "joint_euler_xyz_deg"
 
-            print(f"[{i:04d}/{total:04d}] {src.name} -> {dst.name} (frames={frames}, key={out_key})")
+            print(
+                f"[{i:04d}/{total:04d}] {src.name} -> {dst.name} "
+                f"(frames={frames}, key={out_key}, source_frame={source_frame}, basis={args.basis_conversion})"
+            )
 
         print(f"Done. processed={total}, output_dir={out_dir}")
         return
@@ -238,11 +328,19 @@ def main():
     out_path = resolve_repo_path(repo_root, args.output)
 
     data = read_json(in_path)
-    payload = convert_payload(data, keep_pcd_files=not args.no_pcd_files)
+    source_frame = infer_source_frame(data, source_frame_arg=args.source_frame)
+    payload = convert_payload(
+        data,
+        source_frame=source_frame,
+        basis_conversion=args.basis_conversion,
+        keep_pcd_files=not args.no_pcd_files,
+    )
     write_json(out_path, payload, ascii_flag=args.ascii, compact=args.compact)
 
     print(f"saved: {out_path}")
     print(f"keys: {list(payload.keys())}")
+    print(f"source_frame={source_frame} -> target_frame={FRAME_UNITY_RUF_LHS}")
+    print(f"basis_conversion={args.basis_conversion}")
 
 
 if __name__ == "__main__":

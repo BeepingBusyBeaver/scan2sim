@@ -9,6 +9,18 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation as R
+from scripts.common.coord_utils import (
+    FLU_TO_UNITY_BASIS,
+    FRAME_OUSTER_FLU_RHS,
+    FRAME_UNITY_RUF_LHS,
+    convert_rotvec_to_unity,
+    convert_vec3_to_unity,
+)
+from scripts.common.livehps_defaults import (
+    HUMAN2SMPL_DEFAULT_EXPORT_COORDS,
+    HUMAN2SMPL_DEFAULT_LEGACY_AS,
+    PIPELINE_DEFAULT_SOURCE_FRAME,
+)
 from scripts.common.path_utils import natural_key_path
 from scripts.common.io_paths import (
     DATA_INTEROP_SMPL_DIR,
@@ -36,9 +48,8 @@ python -m scripts.infer.infer_point \
   --weights ../LiveHPS/save_models/livehps.t7 \
   --device auto \
   --source_frame ouster_flu_rhs \
-  --export_coords both \
-  --legacy_as source \
-  --unity_pose_mode root_only
+  --export_coords source \
+  --legacy_as source
 
 
 python -m scripts.infer.infer_point \
@@ -47,30 +58,10 @@ python -m scripts.infer.infer_point \
   --weights ../LiveHPS/save_models/livehps.t7 \
   --device auto \
   --source_frame ouster_flu_rhs \
-  --export_coords both \
-  --legacy_as source \
-  --unity_pose_mode root_only
+  --export_coords source \
+  --legacy_as source
 
 """
-
-
-# -----------------------------
-# Coordinate conversion constants
-# -----------------------------
-# Ouster FLU (RHS): x=forward, y=left, z=up
-# Unity  RUF (LHS): x=right,   y=up,   z=forward
-# Mapping:
-#   x_u = -y_flu
-#   y_u =  z_flu
-#   z_u =  x_flu
-FLU_TO_UNITY_C = np.array(
-    [
-        [0.0, -1.0, 0.0],  # x_u
-        [0.0,  0.0, 1.0],  # y_u
-        [1.0,  0.0, 0.0],  # z_u
-    ],
-    dtype=np.float32,
-)
 
 
 def parse_args():
@@ -162,21 +153,21 @@ def parse_args():
     parser.add_argument(
         "--source_frame",
         type=str,
-        default="ouster_flu_rhs",
-        choices=["ouster_flu_rhs", "unity_ruf_lhs"],
+        default=PIPELINE_DEFAULT_SOURCE_FRAME,
+        choices=[FRAME_OUSTER_FLU_RHS, FRAME_UNITY_RUF_LHS],
         help="Coordinate frame of input point clouds.",
     )
     parser.add_argument(
         "--export_coords",
         type=str,
-        default="both",
+        default=HUMAN2SMPL_DEFAULT_EXPORT_COORDS,
         choices=["source", "unity", "both"],
         help="Which coordinate versions to store in npz.",
     )
     parser.add_argument(
         "--legacy_as",
         type=str,
-        default="source",
+        default=HUMAN2SMPL_DEFAULT_LEGACY_AS,
         choices=["source", "unity"],
         help=(
             "Which coordinate version to write into legacy keys "
@@ -332,43 +323,6 @@ def choose_device(device_arg: str):
     return torch.device(device_arg)
 
 
-# -----------------------------
-# Coordinate conversion helpers
-# -----------------------------
-def flu_to_unity_vec(vec_seq: np.ndarray) -> np.ndarray:
-    """
-    vec_seq: [..., 3] in FLU
-    return : [..., 3] in Unity RUF
-    """
-    v = np.asarray(vec_seq, dtype=np.float32)
-    out = np.empty_like(v)
-    out[..., 0] = -v[..., 1]  # x_u = -y_flu
-    out[..., 1] =  v[..., 2]  # y_u =  z_flu
-    out[..., 2] =  v[..., 0]  # z_u =  x_flu
-    return out
-
-
-def change_basis_rotvec(rotvec: np.ndarray, C: np.ndarray) -> np.ndarray:
-    """
-    Generic basis change for axis-angle rotations.
-    rotvec: [..., 3] axis-angle (radian)
-    C:      [3,3] basis mapping matrix (v_new = C @ v_old)
-    """
-    rv = np.asarray(rotvec, dtype=np.float32)
-    mats = R.from_rotvec(rv.reshape(-1, 3)).as_matrix().astype(np.float32)  # [M,3,3]
-    mats_new = np.einsum("ab,mbc,cd->mad", C.astype(np.float32), mats, C.astype(np.float32).T)
-    rv_new = R.from_matrix(mats_new).as_rotvec().astype(np.float32)
-    return rv_new.reshape(rv.shape)
-
-
-def flu_to_unity_rotvec_any(rotvec: np.ndarray) -> np.ndarray:
-    """
-    rotvec: [...,3] in FLU basis
-    return: [...,3] in Unity basis
-    """
-    return change_basis_rotvec(rotvec, FLU_TO_UNITY_C)
-
-
 def convert_pose_seq72_to_unity(
     pose_seq72: np.ndarray,
     source_frame: str,
@@ -385,18 +339,18 @@ def convert_pose_seq72_to_unity(
     if pose_seq72.ndim != 2 or pose_seq72.shape[1] != 72:
         raise ValueError(f"Expected pose_seq [T,72], got {pose_seq72.shape}")
 
-    if source_frame == "unity_ruf_lhs":
+    if source_frame == FRAME_UNITY_RUF_LHS:
         return pose_seq72.copy()
 
     # source is ouster_flu_rhs
     rv24 = pose_seq72.reshape(-1, 24, 3)
 
     if unity_pose_mode == "all_joints":
-        rv24_u = flu_to_unity_rotvec_any(rv24)
+        rv24_u = convert_rotvec_to_unity(rv24, source_frame=source_frame)
     elif unity_pose_mode == "root_only":
         rv24_u = rv24.copy()
         # pelvis/global orientation only
-        rv24_u[:, 0, :] = flu_to_unity_rotvec_any(rv24[:, 0, :])
+        rv24_u[:, 0, :] = convert_rotvec_to_unity(rv24[:, 0, :], source_frame=source_frame)
         # body local joints remain unchanged
     else:
         raise ValueError(f"Unknown unity_pose_mode: {unity_pose_mode}")
@@ -409,11 +363,11 @@ def convert_vec_seq_to_unity(vec_seq: np.ndarray, source_frame: str) -> np.ndarr
     if vec_seq.ndim != 2 or vec_seq.shape[1] != 3:
         raise ValueError(f"Expected vec_seq [T,3], got {vec_seq.shape}")
 
-    if source_frame == "unity_ruf_lhs":
+    if source_frame == FRAME_UNITY_RUF_LHS:
         return vec_seq.copy()
 
     # source is ouster_flu_rhs
-    return flu_to_unity_vec(vec_seq)
+    return convert_vec3_to_unity(vec_seq, source_frame=source_frame).astype(np.float32)
 
 
 def pack_single_or_seq(seq: np.ndarray) -> np.ndarray:
@@ -469,15 +423,20 @@ def run_inference(
     trans_seq_src = trans.reshape(1, t, 3).squeeze(0).cpu().numpy().astype(np.float32)   # [T,3]
     trans_world_seq_src = (trans_seq_src + centers_seq_src).astype(np.float32)           # [T,3]
 
-    # unity-frame converted outputs
-    pose_seq_unity = convert_pose_seq72_to_unity(
-        pose_seq_src, args.source_frame, args.unity_pose_mode
-    )                                                                                      # [T,72]
-    trans_seq_unity = convert_vec_seq_to_unity(trans_seq_src, args.source_frame)          # [T,3]
-    centers_seq_unity = convert_vec_seq_to_unity(centers_seq_src, args.source_frame)      # [T,3]
-    trans_world_seq_unity = convert_vec_seq_to_unity(
-        trans_world_seq_src, args.source_frame
-    )                                                                                      # [T,3]
+    need_unity_coords = args.export_coords in ("unity", "both") or args.legacy_as == "unity"
+    pose_seq_unity = None
+    trans_seq_unity = None
+    centers_seq_unity = None
+    trans_world_seq_unity = None
+    if need_unity_coords:
+        pose_seq_unity = convert_pose_seq72_to_unity(
+            pose_seq_src, args.source_frame, args.unity_pose_mode
+        )                                                                                  # [T,72]
+        trans_seq_unity = convert_vec_seq_to_unity(trans_seq_src, args.source_frame)      # [T,3]
+        centers_seq_unity = convert_vec_seq_to_unity(centers_seq_src, args.source_frame)  # [T,3]
+        trans_world_seq_unity = convert_vec_seq_to_unity(
+            trans_world_seq_src, args.source_frame
+        )                                                                                  # [T,3]
 
     # choose legacy alias
     if args.legacy_as == "source":
@@ -487,11 +446,13 @@ def run_inference(
         trans_world_seq_legacy = trans_world_seq_src
         legacy_frame_name = args.source_frame
     else:
+        if pose_seq_unity is None:
+            raise RuntimeError("Unity coordinates were not prepared while --legacy_as unity is requested.")
         pose_seq_legacy = pose_seq_unity
         trans_seq_legacy = trans_seq_unity
         centers_seq_legacy = centers_seq_unity
         trans_world_seq_legacy = trans_world_seq_unity
-        legacy_frame_name = "unity_ruf_lhs"
+        legacy_frame_name = FRAME_UNITY_RUF_LHS
 
     # build save dict
     save_dict = {
@@ -500,12 +461,12 @@ def run_inference(
 
         # metadata
         "meta_source_frame": np.array(args.source_frame),
-        "meta_target_frame_unity": np.array("unity_ruf_lhs"),
+        "meta_target_frame_unity": np.array(FRAME_UNITY_RUF_LHS),
         "meta_export_coords": np.array(args.export_coords),
         "meta_legacy_as": np.array(args.legacy_as),
         "meta_legacy_frame_name": np.array(legacy_frame_name),
         "meta_rotation_vector_unit": np.array("radian"),
-        "meta_flu_to_unity_C": FLU_TO_UNITY_C.astype(np.float32),
+        "meta_flu_to_unity_C": FLU_TO_UNITY_BASIS.astype(np.float32),
         "meta_unity_pose_mode": np.array(args.unity_pose_mode),
         "num_frames": np.array([t], dtype=np.int32),
         "num_points_per_frame": np.array([args.num_points], dtype=np.int32),
@@ -527,6 +488,8 @@ def run_inference(
 
     # unity keys
     if args.export_coords in ("unity", "both"):
+        if pose_seq_unity is None:
+            raise RuntimeError("Unity coordinate export requested but conversion result is missing.")
         save_dict.update({
             "pose_seq_unity": pose_seq_unity.astype(np.float32),
             "trans_seq_unity": trans_seq_unity.astype(np.float32),

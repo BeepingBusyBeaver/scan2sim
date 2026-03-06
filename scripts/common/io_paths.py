@@ -87,6 +87,15 @@ _define_paths(
 
 _define_paths(
     _SCOPE,
+    (*_OUTPUTS, "feature_models"),
+    {
+        "OUTPUTS_FEATURE_MODELS_DIR": (),
+        "OUTPUTS_FEATURE_POINTNET2_12HEAD_DIR": ("pointnet2_12head",),
+    },
+)
+
+_define_paths(
+    _SCOPE,
     (*_DATA, "real"),
     {
         "DATA_REAL_DIR": (),
@@ -146,6 +155,17 @@ _define_paths(
     _CONFIGS,
     {
         "CONFIG_AXIS_STEPS_YAML": ("axis_steps.yaml",),
+        "CONFIG_FEATURE_LABEL_RULES_JSON": ("feature", "label_rules.json",),
+        "CONFIG_FEATURE_POINTNET2_YAML": ("feature", "pointnet2_multitask.yaml",),
+    },
+)
+
+_define_paths(
+    _SCOPE,
+    (*_DATA, "feature"),
+    {
+        "DATA_FEATURE_DIR": (),
+        "DATA_FEATURE_MANIFEST_JSONL": ("manifest.jsonl",),
     },
 )
 

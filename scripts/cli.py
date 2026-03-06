@@ -15,15 +15,27 @@ COMMANDS: Dict[str, Tuple[str, str]] = {
     "infer-smpl": ("scripts.infer.infer_point", "main"),
     "human-to-smpl": ("scripts.infer.infer_point", "main"),
     "human2smpl": ("scripts.infer.infer_point", "main"),
-    "pipeline-livehps": ("scripts.pipeline.run_livehps_pipeline", "main"),
-    "run-pipeline": ("scripts.pipeline.run_livehps_pipeline", "main"),
+    "run-livehps": ("scripts.pipeline.run_livehps_pipeline", "main"),
+    "run-feature-pipeline": ("scripts.pipeline.run_feature_pipeline", "main"),
+    "run-feature": ("scripts.infer.infer_feature_classifier", "main"),
+    "train-feature": ("scripts.train.train_feature_classifier", "main"),
+    "train-pointnet2": ("scripts.train.train_feature_classifier", "main"),
+    "infer-feature": ("scripts.infer.infer_feature_classifier", "main"),
+    "infer-pointnet2": ("scripts.infer.infer_feature_classifier", "main"),
+    "build-feature-manifest": ("scripts.data.build_feature_manifest", "main"),
+    "feature-manifest": ("scripts.data.build_feature_manifest", "main"),
     "match-one": ("scripts.eval.match_one", "main"),
     "npz-to-obj": ("scripts.conversion.npz_to_obj", "main"),
     "npz2obj": ("scripts.conversion.npz_to_obj", "main"),
+    "pcd-to-ply": ("scripts.conversion.pcd_to_ply", "main"),
+    "pcd2ply": ("scripts.conversion.pcd_to_ply", "main"),
     "npz-to-fbx": ("scripts.conversion.npz_to_fbx", "main"),
     "npz2fbx": ("scripts.conversion.npz_to_fbx", "main"),
     "npz-to-quat": ("scripts.conversion.npz_to_quat", "main"),
     "npz2quat": ("scripts.conversion.npz_to_quat", "main"),
+    "fit-bind-local": ("scripts.conversion.fit_bind_local_quat", "main"),
+    "fit-bind-local-quat": ("scripts.conversion.fit_bind_local_quat", "main"),
+    "fitbind": ("scripts.conversion.fit_bind_local_quat", "main"),
     "quat-to-unity": ("scripts.conversion.quat_to_unity", "main"),
     "quat2unity": ("scripts.conversion.quat_to_unity", "main"),
     "label-classify": ("scripts.labeling.classify_label", "main"),
@@ -45,7 +57,9 @@ def print_help() -> None:
     print(command_list)
     print("\nPipeline shortcuts:")
     print("  pcap2pcd -> pcd2human -> human2smpl -> npz2quat/npz2obj/npz2fbx -> quat2unity -> unity2label")
-    print("  run-pipeline (or pipeline-livehps) for end-to-end execution")
+    print("  run-livehps (LiveHPS end-to-end)")
+    print("  run-feature-pipeline (PointNet++ manifest/train/infer)")
+    print("  run-feature (PointNet++ feature-only inference)")
 
 
 def main() -> None:

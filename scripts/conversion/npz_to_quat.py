@@ -6,7 +6,21 @@ from typing import Optional, List, Tuple, Dict, Any
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from scripts.common.json_utils import write_json
+from scripts.common.coord_utils import (
+    FRAME_OUSTER_FLU_RHS,
+    FRAME_UNITY_RUF_LHS,
+    SUPPORTED_SOURCE_FRAMES,
+    convert_rotvec_to_unity,
+    convert_vec3_to_unity,
+)
+from scripts.common.livehps_defaults import (
+    DEFAULT_UNITY_BIND_LOCAL_QUAT_JSON,
+    NPZ2QUAT_DEFAULT_BIND_COMPOSE_ORDER,
+    NPZ2QUAT_DEFAULT_COORD_SYSTEM,
+    NPZ2QUAT_DEFAULT_UNITY_POSE_MODE,
+    PIPELINE_DEFAULT_SOURCE_FRAME,
+)
+from scripts.common.json_utils import read_json, write_json
 from scripts.common.path_utils import natural_key_path
 from scripts.common.io_paths import (
     DATA_INTEROP_QUAT_DIR,
@@ -19,9 +33,9 @@ python -m scripts.conversion.npz_to_quat \
   --input outputs/smpl/livehps_smpl_virtual.npz \
   --output outputs/quat/livehps_quaternion_virtual.json \
   --coord-system unity \
-  --source-handedness lhs \
+  --source-frame ouster_flu_rhs \
+  --unity-pose-mode root_only \
   --rotation-format quat \
-  --pre_flip_yz
 
 Batch:
 python -m scripts.conversion.npz_to_quat \
@@ -31,9 +45,9 @@ python -m scripts.conversion.npz_to_quat \
   --output_dir outputs/quat \
   --output_prefix "livehps_quaternion_" \
   --coord-system unity \
-  --source-handedness lhs \
+  --source-frame ouster_flu_rhs \
+  --unity-pose-mode root_only \
   --rotation-format quat \
-  --pre_flip_yz
 """
 
 DEFAULT_SMPL_24_JOINT_NAMES = [
@@ -54,6 +68,15 @@ def pick_key(data, key, fallback=None):
     return None
 
 
+def read_npz_scalar_str(data, key: str) -> Optional[str]:
+    if key not in data.files:
+        return None
+    arr = np.asarray(data[key])
+    if arr.size == 0:
+        return None
+    return str(arr.reshape(-1)[0])
+
+
 def parse_joint_names(joint_names_arg: Optional[str]):
     if joint_names_arg is None:
         return DEFAULT_SMPL_24_JOINT_NAMES
@@ -61,6 +84,45 @@ def parse_joint_names(joint_names_arg: Optional[str]):
     if len(names) != 24:
         raise ValueError(f"--joint-names must contain exactly 24 names, got {len(names)}.")
     return names
+
+
+def infer_source_frame_for_npz(
+    data: Any,
+    source_frame_option: str,
+    source_handedness: str,
+) -> str:
+    if source_frame_option != "auto":
+        return source_frame_option
+
+    source_frame = read_npz_scalar_str(data, "meta_source_frame")
+    if source_frame in SUPPORTED_SOURCE_FRAMES:
+        return source_frame
+
+    legacy_frame = read_npz_scalar_str(data, "meta_legacy_frame_name")
+    if legacy_frame in SUPPORTED_SOURCE_FRAMES:
+        return legacy_frame
+
+    if source_handedness == "lhs":
+        return FRAME_UNITY_RUF_LHS
+    return FRAME_OUSTER_FLU_RHS
+
+
+def convert_pose_seq_to_unity(rotvec_seq: np.ndarray, source_frame: str, unity_pose_mode: str) -> np.ndarray:
+    rv = np.asarray(rotvec_seq, dtype=np.float32).copy()
+    if source_frame == FRAME_UNITY_RUF_LHS:
+        return rv
+
+    if source_frame != FRAME_OUSTER_FLU_RHS:
+        raise ValueError(f"Unsupported source frame for Unity conversion: {source_frame}")
+
+    if unity_pose_mode == "all_joints":
+        return convert_rotvec_to_unity(rv, source_frame=source_frame).astype(np.float32)
+
+    if unity_pose_mode == "root_only":
+        rv[:, 0, :] = convert_rotvec_to_unity(rv[:, 0, :], source_frame=source_frame).astype(np.float32)
+        return rv
+
+    raise ValueError(f"Unsupported --unity-pose-mode: {unity_pose_mode}")
 
 
 def pose_to_rotvec_seq(pose_array: np.ndarray) -> np.ndarray:
@@ -114,32 +176,6 @@ def trans_to_seq(trans_array: np.ndarray) -> np.ndarray:
         raise ValueError(f"2D trans must be [T,3], got shape={arr.shape}")
 
     raise ValueError(f"Unsupported trans shape: {arr.shape}")
-
-
-def rhs_to_unity_vec3(vec_seq: np.ndarray) -> np.ndarray:
-    """
-    RHS -> Unity(LHS) 변환 (X,Y 유지, Z 반전)
-    """
-    out = np.asarray(vec_seq, dtype=np.float32).copy()
-    out[..., 2] *= -1.0
-    return out
-
-
-def rhs_to_unity_rotvec_seq(rotvec_seq: np.ndarray) -> np.ndarray:
-    """
-    회전벡터(rh) -> 회전행렬 -> Unity basis로 유사변환 -> 회전벡터(lh)
-    R_u = S * R_rh * S,  S = diag(1,1,-1)
-    """
-    rotvec_seq = np.asarray(rotvec_seq, dtype=np.float32)
-    orig_shape = rotvec_seq.shape  # [T,24,3]
-
-    mats = R.from_rotvec(rotvec_seq.reshape(-1, 3)).as_matrix().astype(np.float32)  # [M,3,3]
-    S = np.diag([1.0, 1.0, -1.0]).astype(np.float32)
-
-    mats_u = np.einsum("ab,mbc,cd->mad", S, mats, S)
-    rotvec_u = R.from_matrix(mats_u).as_rotvec().astype(np.float32)
-
-    return rotvec_u.reshape(orig_shape)
 
 
 def flip_yz_vec3(vec_seq: np.ndarray) -> np.ndarray:
@@ -264,6 +300,88 @@ def rotvec_seq_to_quat_seq(
     return quat.astype(np.float32)
 
 
+def quat_multiply_xyzw(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """
+    Hamilton product for xyzw quaternions.
+    """
+    q1 = np.asarray(q1, dtype=np.float32)
+    q2 = np.asarray(q2, dtype=np.float32)
+
+    x1, y1, z1, w1 = np.moveaxis(q1, -1, 0)
+    x2, y2, z2, w2 = np.moveaxis(q2, -1, 0)
+
+    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+    return np.stack([x, y, z, w], axis=-1).astype(np.float32)
+
+
+def normalize_quat_xyzw_array(quat: np.ndarray) -> np.ndarray:
+    q = np.asarray(quat, dtype=np.float32)
+    n = np.linalg.norm(q, axis=-1, keepdims=True)
+    if np.any(n <= 1e-12):
+        raise ValueError("Invalid quaternion norm (<= 1e-12) found while normalizing.")
+    return (q / n).astype(np.float32)
+
+
+def parse_joint_quat_dict(quat_dict: Dict[str, Any], joint_names: List[str]) -> np.ndarray:
+    quat_arr = np.zeros((len(joint_names), 4), dtype=np.float32)
+    for j, name in enumerate(joint_names):
+        if name not in quat_dict:
+            raise KeyError(f"bind quaternion json missing joint: {name}")
+        entry = quat_dict[name]
+        if not isinstance(entry, dict):
+            raise TypeError(f"bind quaternion entry for {name} must be dict, got {type(entry)}")
+        for key in ("x", "y", "z", "w"):
+            if key not in entry:
+                raise KeyError(f"bind quaternion entry for {name} missing key: {key}")
+        quat_arr[j] = [
+            float(entry["x"]),
+            float(entry["y"]),
+            float(entry["z"]),
+            float(entry["w"]),
+        ]
+    return normalize_quat_xyzw_array(quat_arr)
+
+
+def load_bind_local_quat_array(bind_json_path: Path, joint_names: List[str]) -> np.ndarray:
+    payload = read_json(bind_json_path)
+    if not isinstance(payload, dict):
+        raise TypeError("bind quaternion json must be an object/dict.")
+
+    if "joint_quat_xyzw" in payload and isinstance(payload["joint_quat_xyzw"], dict):
+        payload = payload["joint_quat_xyzw"]
+
+    return parse_joint_quat_dict(payload, joint_names)
+
+
+def compose_bind_local_quat(
+    pose_quat_seq: np.ndarray,
+    bind_local_quat: np.ndarray,
+    compose_order: str,
+) -> np.ndarray:
+    pose = np.asarray(pose_quat_seq, dtype=np.float32)
+    bind = np.asarray(bind_local_quat, dtype=np.float32)
+
+    if pose.ndim != 3 or pose.shape[-1] != 4:
+        raise ValueError(f"pose_quat_seq must be [T,J,4], got {pose.shape}")
+    if bind.shape != (pose.shape[1], 4):
+        raise ValueError(
+            f"bind_local_quat shape mismatch: expected {(pose.shape[1], 4)}, got {bind.shape}"
+        )
+
+    bind_seq = np.broadcast_to(bind[None, :, :], pose.shape).astype(np.float32)
+    if compose_order == "bind_mul_pose":
+        out = quat_multiply_xyzw(bind_seq, pose)
+    elif compose_order == "pose_mul_bind":
+        out = quat_multiply_xyzw(pose, bind_seq)
+    else:
+        raise ValueError(f"Unsupported bind compose order: {compose_order}")
+
+    return normalize_quat_xyzw_array(out)
+
+
 def build_joint_xyz_deg(rotvec_seq: np.ndarray, joint_names: List[str]):
     """
     rotvec_seq: [T,24,3] (radian)
@@ -358,13 +476,18 @@ def convert_npz_to_payload(
     allow_pickle: bool,
     joint_names: List[str],
     coord_system: str,
+    source_frame_option: str,
     source_handedness: str,
+    unity_pose_mode: str,
     pre_mirror_x: bool,
     pre_flip_yz: bool,
     rotation_format: str,
     trans_key_option: str,
     no_quat_canonical: bool,
     no_quat_continuity: bool,
+    bind_local_quat: Optional[np.ndarray],
+    bind_compose_order: str,
+    bind_source_label: Optional[str],
 ) -> Tuple[Dict[str, Any], int]:
     with np.load(in_path, allow_pickle=allow_pickle) as data:
         pose_k = pick_key(data, "pose", fallback=["pose_seq"])
@@ -393,6 +516,11 @@ def convert_npz_to_payload(
 
         rotvec_seq = pose_to_rotvec_seq(pose_arr)   # [T,24,3], rad
         trans_seq = trans_to_seq(trans_arr)         # [T,3]
+        source_frame = infer_source_frame_for_npz(
+            data=data,
+            source_frame_option=source_frame_option,
+            source_handedness=source_handedness,
+        )
 
         T = rotvec_seq.shape[0]
         if trans_seq.shape[0] == 1 and T > 1:
@@ -405,13 +533,19 @@ def convert_npz_to_payload(
 
         # 좌표계 변환
         coord_meta = "source"
+        payload_source_frame = source_frame
         if coord_system == "unity":
-            if source_handedness == "rhs":
-                rotvec_seq = rhs_to_unity_rotvec_seq(rotvec_seq)
-                trans_seq = rhs_to_unity_vec3(trans_seq)
-                coord_meta = "unity_left_handed (from_rhs: z_flipped)"
-            else:
-                coord_meta = "unity_left_handed (source_already_lhs)"
+            rotvec_seq = convert_pose_seq_to_unity(
+                rotvec_seq=rotvec_seq,
+                source_frame=source_frame,
+                unity_pose_mode=unity_pose_mode,
+            )
+            trans_seq = convert_vec3_to_unity(trans_seq, source_frame=source_frame).astype(np.float32)
+            payload_source_frame = FRAME_UNITY_RUF_LHS
+            coord_meta = (
+                "unity_left_handed "
+                f"(from={source_frame}, unity_pose_mode={unity_pose_mode})"
+            )
 
         # 선택: pre_flip_yz (y/z 성분 반전)
         if pre_flip_yz:
@@ -428,22 +562,32 @@ def convert_npz_to_payload(
         pose_out = seq_to_pose_array(rotvec_seq)      # [72] or [T,72], rad
         trans_out = seq_to_trans_array(trans_seq)     # [3] or [T,3]
 
+        meta: Dict[str, Any] = {
+            "coord_system": coord_meta,
+            "source_frame": payload_source_frame,
+            "source_frame_input": source_frame,
+            "rotation_vector_unit": "radian",
+            "rotation_format": rotation_format,
+            "bind_local_quat_applied": bind_local_quat is not None,
+        }
+        if rotation_format in ("quat", "both"):
+            meta["quaternion_order"] = "xyzw"
+        if coord_system == "unity":
+            meta["unity_pose_mode"] = unity_pose_mode
+        if pre_mirror_x:
+            meta["pre_mirror_x_mode"] = "x_sign_only"
+        if pre_flip_yz:
+            meta["pre_flip_yz_mode"] = "y_z_sign_flip"
+        if bind_local_quat is not None:
+            meta["bind_compose_order"] = bind_compose_order
+            if bind_source_label is not None:
+                meta["bind_local_quat_json"] = bind_source_label
+
         payload = {
             "pose": pose_out.tolist(),
             "betas": betas_arr.tolist(),
             "trans": trans_out.tolist(),
-            "meta": {
-                "coord_system": coord_meta,
-                "rotation_vector_unit": "radian",
-                "rotation_format": rotation_format,
-                "quaternion_order": "xyzw" if rotation_format in ("quat", "both") else None,
-                "pose_key_used": pose_k,
-                "trans_key_used": trans_k,
-                "pre_mirror_x": bool(pre_mirror_x),
-                "pre_mirror_x_mode": "x_sign_only",
-                "pre_flip_yz": bool(pre_flip_yz),
-                "pre_flip_yz_mode": "y_z_sign_flip",
-            },
+            "meta": meta,
         }
 
         # 선택: pcd_files 전달
@@ -466,6 +610,12 @@ def convert_npz_to_payload(
                 canonical=not no_quat_canonical,
                 continuous=not no_quat_continuity,
             )
+            if bind_local_quat is not None:
+                quat_seq = compose_bind_local_quat(
+                    pose_quat_seq=quat_seq,
+                    bind_local_quat=bind_local_quat,
+                    compose_order=bind_compose_order,
+                )
             joint_quat_seq = build_joint_quat_xyzw(quat_seq, joint_names)
             if T == 1:
                 payload["joint_quat_xyzw"] = joint_quat_seq[0]
@@ -528,15 +678,52 @@ def parse_args():
         "--coord-system",
         type=str,
         choices=["unity", "source"],
-        default="unity",
+        default=NPZ2QUAT_DEFAULT_COORD_SYSTEM,
         help="Output coordinate system. default=unity",
+    )
+    parser.add_argument(
+        "--source-frame",
+        type=str,
+        default=PIPELINE_DEFAULT_SOURCE_FRAME,
+        choices=["auto", *SUPPORTED_SOURCE_FRAMES],
+        help=(
+            "Input pose/trans coordinate frame. "
+            "'auto' reads meta_source_frame/meta_legacy_frame_name from npz."
+        ),
     )
     parser.add_argument(
         "--source-handedness",
         type=str,
         choices=["rhs", "lhs"],
-        default="lhs",
-        help="Handedness of input pose/trans. default=lhs",
+        default="rhs",
+        help="Fallback handedness when --source-frame auto and frame metadata is missing.",
+    )
+    parser.add_argument(
+        "--unity-pose-mode",
+        type=str,
+        default=NPZ2QUAT_DEFAULT_UNITY_POSE_MODE,
+        choices=["root_only", "all_joints"],
+        help=(
+            "When --coord-system unity, convert pose as root_only (default; global orientation only) "
+            "or all_joints."
+        ),
+    )
+    parser.add_argument(
+        "--bind-local-quat-json",
+        type=str,
+        default=None,
+        help=(
+            "Optional JSON path for Unity bind local rotations by joint name. "
+            "If provided, output quaternion is composed as bind * pose (default order). "
+            f"If omitted and '{DEFAULT_UNITY_BIND_LOCAL_QUAT_JSON}' exists, it is auto-applied."
+        ),
+    )
+    parser.add_argument(
+        "--bind-compose-order",
+        type=str,
+        default=NPZ2QUAT_DEFAULT_BIND_COMPOSE_ORDER,
+        choices=["bind_mul_pose", "pose_mul_bind"],
+        help="Quaternion composition order when --bind-local-quat-json is used.",
     )
     parser.add_argument(
         "--pre_mirror_x",
@@ -585,6 +772,17 @@ def main():
         raise FileNotFoundError(f"Input path not found: {input_path}")
 
     joint_names = parse_joint_names(args.joint_names)
+    bind_local_quat = None
+    bind_source_label = None
+    if args.bind_local_quat_json:
+        bind_json_path = resolve_repo_path(repo_root, args.bind_local_quat_json)
+    else:
+        default_bind_json = resolve_repo_path(repo_root, DEFAULT_UNITY_BIND_LOCAL_QUAT_JSON)
+        bind_json_path = default_bind_json if default_bind_json.exists() else None
+
+    if bind_json_path is not None:
+        bind_local_quat = load_bind_local_quat_array(bind_json_path, joint_names)
+        bind_source_label = str(bind_json_path)
 
     # -------------------------
     # Batch mode
@@ -609,13 +807,18 @@ def main():
                 allow_pickle=args.allow_pickle,
                 joint_names=joint_names,
                 coord_system=args.coord_system,
+                source_frame_option=args.source_frame,
                 source_handedness=args.source_handedness,
+                unity_pose_mode=args.unity_pose_mode,
                 pre_mirror_x=args.pre_mirror_x,
                 pre_flip_yz=args.pre_flip_yz,
                 rotation_format=args.rotation_format,
                 trans_key_option=args.trans_key,
                 no_quat_canonical=args.no_quat_canonical,
                 no_quat_continuity=args.no_quat_continuity,
+                bind_local_quat=bind_local_quat,
+                bind_compose_order=args.bind_compose_order,
+                bind_source_label=bind_source_label,
             )
 
             write_json(
@@ -655,13 +858,18 @@ def main():
         allow_pickle=args.allow_pickle,
         joint_names=joint_names,
         coord_system=args.coord_system,
+        source_frame_option=args.source_frame,
         source_handedness=args.source_handedness,
+        unity_pose_mode=args.unity_pose_mode,
         pre_mirror_x=args.pre_mirror_x,
         pre_flip_yz=args.pre_flip_yz,
         rotation_format=args.rotation_format,
         trans_key_option=args.trans_key,
         no_quat_canonical=args.no_quat_canonical,
         no_quat_continuity=args.no_quat_continuity,
+        bind_local_quat=bind_local_quat,
+        bind_compose_order=args.bind_compose_order,
+        bind_source_label=bind_source_label,
     )
 
     write_json(
@@ -672,8 +880,12 @@ def main():
     )
 
     print(f"Saved JSON: {out_path}")
-    print(f"coord_system={args.coord_system}, source_handedness={args.source_handedness}")
+    print(
+        f"coord_system={args.coord_system}, source_frame={args.source_frame}, "
+        f"unity_pose_mode={args.unity_pose_mode}"
+    )
     print(f"rotation_format={args.rotation_format}, frames={T}")
+    print(f"bind_local_quat_json={bind_source_label}, bind_compose_order={args.bind_compose_order}")
     print(f"pre_mirror_x={args.pre_mirror_x} (mode=x_sign_only)")
     print(f"pre_flip_yz={args.pre_flip_yz} (mode=y_z_sign_flip)")
 

@@ -8,19 +8,6 @@ from typing import Iterable
 import numpy as np
 import open3d as o3d
 
-# --- PCD(mm, back/down/right) -> PLY(m, left/back/up) ---
-S_MM_TO_M = 1e-3
-R_PCD_TO_PLY = np.array(
-    [
-        [0.0, 0.0, -1.0],  # x_ply = -z_pcd
-        [1.0, 0.0,  0.0],  # y_ply =  x_pcd
-        [0.0, -1.0, 0.0],  # z_ply = -y_pcd
-    ],
-    dtype=np.float64,
-)
-T_PCD_TO_PLY = np.eye(4, dtype=np.float64)
-T_PCD_TO_PLY[:3, :3] = S_MM_TO_M * R_PCD_TO_PLY
-
 
 def _fallback_read_pcd_ascii_xyz_rgb(path: Path) -> o3d.geometry.PointCloud:
     """Minimal ASCII .pcd reader (xyz + optional rgb uint32)."""
@@ -120,7 +107,5 @@ def expand_inputs(root: Path, items: Iterable[str], exts: Iterable[str]) -> list
 def apply_pcd_transform_if_needed(
     pcd: o3d.geometry.PointCloud, path: Path, apply: bool = True
 ) -> o3d.geometry.PointCloud:
-    if apply and path.suffix.lower() == ".pcd":
-        pcd = o3d.geometry.PointCloud(pcd)
-        pcd.transform(T_PCD_TO_PLY)
+    _ = path, apply
     return pcd

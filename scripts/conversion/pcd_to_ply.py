@@ -1,4 +1,4 @@
-# scripts/pc/convert_pcd2ply.py
+# scripts/conversion/pcd_to_ply.py
 from __future__ import annotations
 
 import argparse
@@ -9,17 +9,16 @@ import numpy as np
 import open3d as o3d
 
 """
-python -m scripts.pc.convert_pcd2ply \
+python -m scripts.conversion.pcd_to_ply \
   --in_pcd data/real/raw/SN001_000861.pcd \
   --out data/interim/pcd2ply/SN001_000861.ply
 
-python -m scripts.pc.convert_pcd2ply \
+python -m scripts.conversion.pcd_to_ply \
   --in_pcd "data/real/raw/SN001_*.pcd" \
   --out_dir data/interim/pcd2ply
 """
 
 from scripts.common.pc_io import (
-    T_PCD_TO_PLY,
     expand_inputs,
     read_point_cloud_any,
 )
@@ -93,14 +92,11 @@ def main() -> None:
 
             pcd = read_point_cloud_any(in_path)
 
-            # apply mm->m + axis rotation into PLY frame
-            pcd.transform(T_PCD_TO_PLY)
-
             # quick sanity prints
             pts = np.asarray(pcd.points)
             print(f"[OK] Loaded: {in_path}  N={len(pts)}")
             if len(pts) > 0:
-                print(f"     After convert (m, ply-frame): min={pts.min(axis=0)} max={pts.max(axis=0)}")
+                print(f"     Coordinate kept: min={pts.min(axis=0)} max={pts.max(axis=0)}")
 
             ok = o3d.io.write_point_cloud(str(out_path), pcd, write_ascii=args.ascii)
             if not ok:

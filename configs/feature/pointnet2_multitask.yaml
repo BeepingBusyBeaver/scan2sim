@@ -1,0 +1,43 @@
+experiment:
+  name: pointnet2_15head
+  seed: 42
+
+paths:
+  manifest: data/feature/manifest.jsonl
+  head_rules: configs/feature/label_rules.json
+  output_dir: outputs/feature_models/pointnet2_15head
+
+data:
+  num_points: 1024
+  normalize: true
+  cache_in_memory: false
+  split:
+    mode: field
+    train_value: train
+    val_value: val
+    val_ratio: 0.2
+  augment:
+    enabled: true
+    jitter_std: 0.005
+    jitter_clip: 0.02
+
+model:
+  sa_npoints: [512, 128]
+  sa_k: [32, 32]
+  sa_mlps:
+    - [64, 64, 128]
+    - [128, 128, 256]
+  global_mlp: [256, 512]
+  head_hidden: 256
+  head_dropout: 0.2
+
+train:
+  batch_size: 12
+  num_workers: 0
+  epochs: 60
+  lr: 0.001
+  weight_decay: 0.0001
+  freeze_backbone: true
+  device: auto
+  log_interval: 10
+  save_every: 5

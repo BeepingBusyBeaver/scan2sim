@@ -16,7 +16,6 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 from scripts.common.pc_io import (
-    apply_pcd_transform_if_needed,
     expand_inputs,
     read_point_cloud_any,
 )
@@ -53,7 +52,6 @@ python -m scripts.pc.extract_person \
   --vertical_plane_dist 0.01 --vertical_plane_min_inliers 300 \
   --post_rad_radius 0.08 --post_rad_min_points 8 \
   --debug_dir data/interim/debug_extract \
-  --no_pcd_transform \
   --y_min -0.9 --y_max 0.6
 
 """
@@ -516,7 +514,6 @@ def process_one(
                 print(msg)
 
         pcd = read_point_cloud_any(in_path)
-        pcd = apply_pcd_transform_if_needed(pcd, in_path, args.apply_pcd_transform)
         pts = to_numpy(pcd)
         st.raw_points = int(len(pts))
         vlog(f"[INFO] Processing: {in_path} | raw={st.raw_points}")
@@ -839,12 +836,8 @@ def main() -> None:
     ap.add_argument("--output_digits", type=int, default=3, help="Zero-padding digits for output_mode=human_index.")
     ap.add_argument("--ascii", action="store_true", help="Write output in ASCII.")
 
-    ap.add_argument(
-        "--no_pcd_transform",
-        action="store_false",
-        dest="apply_pcd_transform",
-        help="Disable mm->m + axis conversion for .pcd (default: apply).",
-    )
+    ap.add_argument("--no_pcd_transform", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--apply_pcd_transform", action="store_true", help=argparse.SUPPRESS)
 
     # NEW: logging/summaries
     ap.add_argument("--verbose", action="store_true", help="Print per-file logs (debug).")
@@ -942,7 +935,6 @@ def main() -> None:
         if not bg_path.exists():
             raise ValueError(f"Background file not found: {bg_path}")
         bg_pcd_raw = read_point_cloud_any(bg_path)
-        bg_pcd_raw = apply_pcd_transform_if_needed(bg_pcd_raw, bg_path, args.apply_pcd_transform)
         bg_pcd = bg_pcd_raw.voxel_down_sample(args.bg_voxel)
         bg_pts_static = to_numpy(bg_pcd)
 

@@ -21,16 +21,16 @@ python -m scripts.labeling.export_step_jsonl \
 
 Directory mode (full JSONL):
 python -m scripts.labeling.export_step_jsonl \
-  --input outputs/OFFSIDE001/label \
+  --input outputs/VAR001/label \
   --pattern "livehps_label_*.json" \
   --mode full \
-  --output outputs/OFFSIDE001/label/livehps_label_OFFSIDE001_full.jsonl
+  --output outputs/VAR001/label/livehps_label_VAR001_full.jsonl
 
 File mode:
 python -m scripts.labeling.export_step_jsonl \
-  --input outputs/OFFSIDE002/label/livehps_label_002.json \
+  --input outputs/VAR001/label/livehps_label_001.json \
   --mode step \
-  --output outputs/OFFSIDE002/label/livehps_label_002_step.jsonl
+  --output outputs/VAR001/label/livehps_label_001_step.jsonl
 """
 
 

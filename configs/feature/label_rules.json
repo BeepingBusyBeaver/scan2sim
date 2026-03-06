@@ -1,0 +1,107 @@
+{
+  "version": "2.1.0",
+  "meta": {
+    "task": "feature_only_multitask_classification",
+    "description": "PointNet++ 15-head labels for scan2sim (PelvisXYZ + 12 joints)."
+  },
+  "defaults": {
+    "weight": 1.0,
+    "boundary_relax": {
+      "enabled": false,
+      "mode": "adjacent",
+      "epsilon": 0.0
+    }
+  },
+  "heads": [
+    {
+      "name": "PelvisX",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "PelvisY",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "PelvisZ",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "RightHipX",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "RightHipZ",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "LeftHipX",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "LeftHipZ",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "RightKneeX",
+      "class_values": [0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.04 }
+    },
+    {
+      "name": "LeftKneeX",
+      "class_values": [0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.04 }
+    },
+    {
+      "name": "RightShoulderX",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "RightShoulderZ",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "LeftShoulderX",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "LeftShoulderZ",
+      "class_values": [-1, 0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.08 }
+    },
+    {
+      "name": "RightElbowY",
+      "class_values": [0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.04 }
+    },
+    {
+      "name": "LeftElbowY",
+      "class_values": [0, 1],
+      "weight": 1.0,
+      "boundary_relax": { "enabled": true, "mode": "adjacent", "epsilon": 0.04 }
+    }
+  ]
+}

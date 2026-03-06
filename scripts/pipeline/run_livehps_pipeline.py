@@ -7,6 +7,18 @@ import sys
 from pathlib import Path
 from typing import List
 
+from scripts.common.coord_utils import FRAME_OUSTER_FLU_RHS, FRAME_UNITY_RUF_LHS
+from scripts.common.livehps_defaults import (
+    DEFAULT_UNITY_BIND_LOCAL_QUAT_JSON,
+    HUMAN2SMPL_DEFAULT_EXPORT_COORDS,
+    HUMAN2SMPL_DEFAULT_LEGACY_AS,
+    LIVEHPS_TRANSFORM_PROFILE,
+    NPZ2QUAT_DEFAULT_BIND_COMPOSE_ORDER,
+    NPZ2QUAT_DEFAULT_COORD_SYSTEM,
+    NPZ2QUAT_DEFAULT_UNITY_POSE_MODE,
+    PIPELINE_DEFAULT_SOURCE_FRAME,
+    QUAT2UNITY_DEFAULT_BASIS_CONVERSION,
+)
 from scripts.common.io_paths import (
     DATA_INTEROP_EULER_DIR,
     DATA_INTEROP_FBX_DIR,
@@ -32,14 +44,14 @@ python -m scripts.pipeline.run_livehps_pipeline \
          1132 1183 1205 1300 1401 \
          1488 1567 1596 1622 1655 \
          1675 \
-  --raw-dir data/real/OFFSIDE001/raw \
-  --human-dir data/real/OFFSIDE001/human \
-  --smpl-dir outputs/OFFSIDE001/smpl \
-  --obj-dir outputs/OFFSIDE001/obj \
-  --fbx-dir outputs/OFFSIDE001/fbx \
-  --quat-dir outputs/OFFSIDE001/quat \
-  --euler-dir outputs/OFFSIDE001/euler \
-  --label-dir outputs/OFFSIDE001/label \
+  --raw-dir data/real/WBmotion/raw \
+  --human-dir data/real/WBmotion/human \
+  --smpl-dir outputs/WBmotion/smpl \
+  --obj-dir outputs/WBmotion/obj \
+  --fbx-dir outputs/WBmotion/fbx \
+  --quat-dir outputs/WBmotion/quat \
+  --euler-dir outputs/WBmotion/euler \
+  --label-dir outputs/WBmotion/label \
   --skip-pcap2pcd
 
 
@@ -84,6 +96,7 @@ def validate_no_zone_identifier_args(args: argparse.Namespace) -> None:
         "smpl_pattern": args.smpl_pattern,
         "quat_dir": args.quat_dir,
         "quat_pattern": args.quat_pattern,
+        "quat_bind_local_json": args.quat_bind_local_json,
         "euler_dir": args.euler_dir,
         "label_dir": args.label_dir,
         "label_euler_pattern": args.label_euler_pattern,
@@ -135,7 +148,7 @@ def resolve_bg_pcd(root: Path, args: argparse.Namespace, raw_dir: Path) -> Path 
     return None
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run unified LiveHPS pipeline: pcap2pcd -> pcd2human -> human2smpl -> npz2quat/npz2obj/npz2fbx -> quat2unity -> unity2label."
     )
@@ -187,8 +200,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pcd2human-debug-dir", type=str, default=DATA_INTERIM_DEBUG_EXTRACT_DIR)
     parser.add_argument("--pcd2human-bg-icp", dest="pcd2human_bg_icp", action="store_true")
     parser.add_argument("--no-pcd2human-bg-icp", dest="pcd2human_bg_icp", action="store_false")
-    parser.add_argument("--pcd2human-apply-pcd-transform", dest="pcd2human_apply_pcd_transform", action="store_true")
-    parser.add_argument("--no-pcd2human-apply-pcd-transform", dest="pcd2human_apply_pcd_transform", action="store_false")
 
     parser.add_argument("--human-dir", type=str, default=DATA_REAL_HUMAN_DIR, help="Human PLY output directory.")
     parser.add_argument("--human-pattern", type=str, default=None, help="Input pattern for human2smpl. default: current-run outputs only.")
@@ -203,6 +214,13 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--weights", type=str, default="../LiveHPS/save_models/livehps.t7", help="LiveHPS weights path.")
     parser.add_argument("--device", type=str, default="cuda", choices=["auto", "cuda", "cpu"], help="Inference device.")
+    parser.add_argument(
+        "--source-frame",
+        type=str,
+        default=PIPELINE_DEFAULT_SOURCE_FRAME,
+        choices=[FRAME_OUSTER_FLU_RHS, FRAME_UNITY_RUF_LHS],
+        help="Source frame used by human2smpl (no coord conversion) and npz2quat/quat2unity.",
+    )
     parser.add_argument("--num-points", type=int, default=256, help="Point samples per frame for human2smpl.")
     parser.add_argument(
         "--batch-per-file",
@@ -225,6 +243,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--smpl-pattern", type=str, default=None, help="Input pattern for npz2quat/npz2obj. default: current-run outputs only.")
     parser.add_argument("--quat-pattern", type=str, default=None, help="Input pattern for quat2unity. default: current-run outputs only.")
+    parser.add_argument(
+        "--quat-bind-local-json",
+        type=str,
+        default=None,
+        help=(
+            "Optional bind local quaternion JSON passed to npz2quat. "
+            f"If omitted and '{DEFAULT_UNITY_BIND_LOCAL_QUAT_JSON}' exists, it is auto-applied."
+        ),
+    )
+    parser.add_argument(
+        "--quat-bind-compose-order",
+        type=str,
+        default=NPZ2QUAT_DEFAULT_BIND_COMPOSE_ORDER,
+        choices=["bind_mul_pose", "pose_mul_bind"],
+        help="Quaternion compose order for npz2quat bind-local composition.",
+    )
     parser.add_argument("--label-euler-pattern", type=str, default=None, help="Euler JSON pattern for unity2label. default: current-run outputs only.")
     parser.add_argument("--label-quat-pattern", type=str, default=None, help="Quaternion JSON pattern for unity2label. default: current-run outputs only.")
     parser.add_argument("--label-euler-prefix", type=str, default=None, help="Euler filename prefix hint for unity2label pairing.")
@@ -244,19 +278,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated joints for unity2label. If omitted, uses classify_label.py default.",
     )
-    parser.add_argument(
-        "--npz2quat-pre-flip-yz",
-        dest="npz2quat_pre_flip_yz",
-        action="store_true",
-        help="Apply --pre_flip_yz when running npz2quat (default: on).",
-    )
-    parser.add_argument(
-        "--no-npz2quat-pre-flip-yz",
-        dest="npz2quat_pre_flip_yz",
-        action="store_false",
-        help="Do not apply --pre_flip_yz when running npz2quat.",
-    )
-
     parser.add_argument("--skip-pcap2pcd", action="store_true")
     parser.add_argument("--skip-pcd2human", action="store_true")
     parser.add_argument("--skip-human2smpl", action="store_true")
@@ -268,15 +289,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print commands only.")
     parser.set_defaults(
         pcd2human_bg_icp=True,
-        pcd2human_apply_pcd_transform=False,
         batch_per_file=True,
-        npz2quat_pre_flip_yz=True,
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: List[str] | None = None) -> None:
+    args = parse_args(argv)
     validate_no_zone_identifier_args(args)
     root = repo_root()
 
@@ -290,6 +309,11 @@ def main() -> None:
     obj_dir = resolve_repo_path(root, args.obj_dir)
     fbx_dir = resolve_repo_path(root, args.fbx_dir)
     rules_json = resolve_repo_path(root, args.rules)
+    if args.quat_bind_local_json:
+        quat_bind_local_json = resolve_repo_path(root, args.quat_bind_local_json)
+    else:
+        default_bind_json = resolve_repo_path(root, DEFAULT_UNITY_BIND_LOCAL_QUAT_JSON)
+        quat_bind_local_json = default_bind_json if default_bind_json.exists() else None
     run_tag = args.run_tag.strip()
     run_tag = "".join(char if (char.isalnum() or char in ("-", "_")) else "_" for char in run_tag)
 
@@ -472,8 +496,6 @@ def main() -> None:
             cmd.extend(["--bg", str(bg_pcd)])
         if args.pcd2human_bg_icp:
             cmd.append("--bg_icp")
-        if not args.pcd2human_apply_pcd_transform:
-            cmd.append("--no_pcd_transform")
         if args.pcd2human_debug_dir:
             cmd.extend(["--debug_dir", str(resolve_repo_path(root, args.pcd2human_debug_dir))])
         steps.append(cmd)
@@ -492,6 +514,12 @@ def main() -> None:
             args.device,
             "--num_points",
             str(int(args.num_points)),
+            "--source_frame",
+            args.source_frame,
+            "--export_coords",
+            HUMAN2SMPL_DEFAULT_EXPORT_COORDS,
+            "--legacy_as",
+            HUMAN2SMPL_DEFAULT_LEGACY_AS,
         ]
         if args.batch_per_file:
             human2smpl_cmd.extend(
@@ -541,24 +569,40 @@ def main() -> None:
             if args.label_joints:
                 label_cmd.extend(["--joints", args.label_joints])
 
+            npz2quat_cmd = [
+                args.python,
+                "-m",
+                "scripts",
+                "npz2quat",
+                "--input",
+                str(smpl_dir),
+                "--batch_per_file",
+                "--input_pattern",
+                smpl_pattern,
+                "--output_dir",
+                str(quat_dir),
+                "--output_prefix",
+                quat_output_prefix,
+                "--coord-system",
+                NPZ2QUAT_DEFAULT_COORD_SYSTEM,
+                "--source-frame",
+                args.source_frame,
+                "--unity-pose-mode",
+                NPZ2QUAT_DEFAULT_UNITY_POSE_MODE,
+            ]
+            if quat_bind_local_json is not None:
+                npz2quat_cmd.extend(
+                    [
+                        "--bind-local-quat-json",
+                        str(quat_bind_local_json),
+                        "--bind-compose-order",
+                        args.quat_bind_compose_order,
+                    ]
+                )
+
             steps.extend(
                 [
-                    [
-                        args.python,
-                        "-m",
-                        "scripts",
-                        "npz2quat",
-                        "--input",
-                        str(smpl_dir),
-                        "--batch_per_file",
-                        "--input_pattern",
-                        smpl_pattern,
-                        "--output_dir",
-                        str(quat_dir),
-                        "--output_prefix",
-                        quat_output_prefix,
-                        *(["--pre_flip_yz"] if args.npz2quat_pre_flip_yz else []),
-                    ],
+                    npz2quat_cmd,
                     [
                         args.python,
                         "-m",
@@ -583,6 +627,10 @@ def main() -> None:
                         str(euler_dir),
                         "--output_prefix",
                         unity_output_prefix,
+                        "--source-frame",
+                        args.source_frame,
+                        "--basis-conversion",
+                        QUAT2UNITY_DEFAULT_BASIS_CONVERSION,
                     ],
                     label_cmd,
                 ]
@@ -615,19 +663,35 @@ def main() -> None:
             if args.label_joints:
                 label_cmd.extend(["--joints", args.label_joints])
 
+            npz2quat_cmd = [
+                args.python,
+                "-m",
+                "scripts",
+                "npz2quat",
+                "--input",
+                str(smpl_single_path),
+                "--output",
+                str(quat_single_path),
+                "--coord-system",
+                NPZ2QUAT_DEFAULT_COORD_SYSTEM,
+                "--source-frame",
+                args.source_frame,
+                "--unity-pose-mode",
+                NPZ2QUAT_DEFAULT_UNITY_POSE_MODE,
+            ]
+            if quat_bind_local_json is not None:
+                npz2quat_cmd.extend(
+                    [
+                        "--bind-local-quat-json",
+                        str(quat_bind_local_json),
+                        "--bind-compose-order",
+                        args.quat_bind_compose_order,
+                    ]
+                )
+
             steps.extend(
                 [
-                    [
-                        args.python,
-                        "-m",
-                        "scripts",
-                        "npz2quat",
-                        "--input",
-                        str(smpl_single_path),
-                        "--output",
-                        str(quat_single_path),
-                        *(["--pre_flip_yz"] if args.npz2quat_pre_flip_yz else []),
-                    ],
+                    npz2quat_cmd,
                     [
                         args.python,
                         "-m",
@@ -647,6 +711,10 @@ def main() -> None:
                         str(quat_single_path),
                         "--output",
                         str(unity_single_path),
+                        "--source-frame",
+                        args.source_frame,
+                        "--basis-conversion",
+                        QUAT2UNITY_DEFAULT_BASIS_CONVERSION,
                     ],
                     label_cmd,
                 ]
@@ -671,6 +739,11 @@ def main() -> None:
         )
 
     print(f"[pipeline] root={root}")
+    print(f"[pipeline] transform_profile={LIVEHPS_TRANSFORM_PROFILE}")
+    if quat_bind_local_json is not None:
+        print(f"[pipeline] bind_local_quat_json={quat_bind_local_json}")
+    elif not args.skip_post:
+        print("[pipeline][WARN] bind local quaternion map is not set; Unity localRotation mismatch can remain.")
     if run_tag:
         print(f"[pipeline] run_tag={run_tag}")
     for cmd in steps:

@@ -1,7 +1,9 @@
 # scan2sim
 
-LiDAR point cloud 기반 사람 추출/SMPL 추론/라벨링을 위한 실행 프로젝트입니다.  
-추론 모델은 `../LiveHPS`(공식 클론 + 가중치)를 사용하고, `scan2sim`은 파이프라인/변환/평가를 담당합니다.
+LiDAR point cloud 기반 사람 추출/추론/라벨링을 위한 실행 프로젝트입니다.  
+현재 `scan2sim`은 두 가지 경로를 지원합니다.
+- LiveHPS 기반 SMPL 파이프라인 (`../LiveHPS` 필요)
+- PointNet++ 기반 feature-only 12-head 분류 파이프라인
 
 ## 1) Requirements
 - OS: Linux (WSL 포함)
@@ -34,14 +36,16 @@ python -m scripts
 
 개별 모듈 help:
 ```bash
-python -m scripts.pipeline.run_livehps_pipeline --help
+python -m scripts run-livehps --help
+python -m scripts run-feature-pipeline --help
+python -m scripts run-feature --help
 python -m scripts.pc.extract_person --help
 python -m scripts.eval.match_one --help
 ```
 
-## 4) End-to-End Pipeline (권장)
+## 4) LiveHPS End-to-End Pipeline
 ```bash
-python -m scripts run-pipeline \
+python -m scripts run-livehps \
   --pcap data/labeling/001/simpleMotion_wonjin.pcap \
   --base SN001 \
   --scan 861 893 929 \
@@ -60,7 +64,7 @@ python -m scripts run-pipeline \
 3. `human2smpl`: `human.ply -> livehps_smpl_*.npz`
 4. `npz2quat`, `npz2obj`, `npz2fbx`, `quat2unity`, `unity2label`
 
-## 5) Step-by-Step Commands
+## 5) LiveHPS Step-by-Step Commands
 ```bash
 python -m scripts pcap2pcd data/labeling/001/simpleMotion_wonjin.pcap \
   --scan 861 --outdir data/real/raw --base SN001
@@ -87,7 +91,56 @@ python -m scripts quat2unity --input outputs/quat --batch_per_file
 python -m scripts unity2label --batch_per_file --euler-json outputs/euler --quat-json outputs/quat
 ```
 
-## 6) Match One (Real ↔ Virtual)
+## 6) Feature-Only 12-Head (PointNet++)
+`Euler/quat/SMPL` 계산 없이 point cloud feature만으로 12개 head를 분류합니다.
+
+원클릭 파이프라인(매니페스트 생성 → 학습 → 추론):
+```bash
+python -m scripts run-feature-pipeline \
+  --points-dir data/real/VAR001/human \
+  --labels-dir data/feature/labels
+```
+
+1) point cloud + label JSON에서 manifest 생성
+```bash
+python -m scripts build-feature-manifest \
+  --points-dir data/real/VAR001/human \
+  --point-pattern "human_*.ply" \
+  --labels-dir data/feature/labels \
+  --label-pattern "*.json" \
+  --output data/feature/manifest.jsonl
+```
+
+2) PointNet++ multi-head 학습
+```bash
+python -m scripts train-feature \
+  --config configs/feature/pointnet2_multitask.yaml
+```
+
+기본값으로 `weights/pointnet2/yanx27/modelnet40_cls/pointnet2_ssg_wo_normals_best_model.pth`를
+encoder 초기화에 자동 사용하고, head는 scan2sim에서 새로 학습합니다.  
+자동 초기화를 끄려면 `--no-auto-init-backbone`을 사용하세요.
+
+3) 학습 모델 추론
+```bash
+python -m scripts infer-feature \
+  --checkpoint outputs/feature_models/pointnet2_12head/checkpoint_best.pt \
+  --input data/real/VAR001/human \
+  --input-pattern "human_*.ply" \
+  --output-dir outputs/feature_pred
+```
+
+`--checkpoint`를 생략하면 `outputs/feature_models/...`와 `weights/pointnet2/...`를 자동 탐색합니다.
+
+동일 기능은 직접 추론 명령으로도 호출:
+```bash
+python -m scripts run-feature \
+  --checkpoint outputs/feature_models/pointnet2_12head/checkpoint_best.pt \
+  --input data/real/VAR001/human \
+  --input-pattern "human_*.ply"
+```
+
+## 7) Match One (Real ↔ Virtual)
 ```bash
 python -m scripts.eval.match_one \
   --real "data/real/human/human_001.ply" \
@@ -97,13 +150,14 @@ python -m scripts.eval.match_one \
   --topk 3
 ```
 
-## 7) Path Policy
+## 8) Path Policy
 - 기본 경로 상수: `scripts/common/io_paths.py`
 - 모든 상대 경로는 `scan2sim/` 루트 기준으로 해석
 - 런타임 산출물:
-  - `outputs/`: SMPL/quat/euler/label/obj
+  - `outputs/`: SMPL/quat/euler/label/obj/feature_models
+  - `data/feature/manifest.jsonl`: feature 학습용 샘플 매니페스트
   - `data/match_one/`: 매칭 평가 산출물
 
-## 8) Related Docs
+## 9) Related Docs
 - `docs/PROJECT_STRUCTURE.md`
 - `docs/integration/SCRIPTS.md`
