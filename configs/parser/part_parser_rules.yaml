@@ -1,0 +1,37 @@
+preprocess:
+  enabled: true
+  voxel_size: 0.015
+  radius_outlier:
+    enabled: false
+    nb_points: 4
+    radius: 0.12
+  statistical_outlier:
+    enabled: false
+    nb_neighbors: 12
+    std_ratio: 3.0
+  hidden_point_filter:
+    enabled: false
+    radius_scale: 4.0
+    camera_offset: [0.0, 0.0, 1.0]
+
+body_frame:
+  world_up: [0.0, 1.0, 0.0]
+
+parser:
+  left_is_positive_x: true
+  min_points_per_part: 6
+  torso:
+    y_range: [0.44, 0.80]
+    x_scale: 1.2
+  head:
+    y_range: [0.78, 1.02]
+    x_scale: 1.25
+  arm:
+    y_range: [0.36, 0.84]
+    side_min_scale: 0.45
+  leg:
+    y_range: [0.00, 0.46]
+    side_min_scale: 0.10
+  continuity:
+    enabled: true
+    blend_with_prev: 0.15

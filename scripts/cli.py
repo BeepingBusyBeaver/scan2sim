@@ -17,6 +17,9 @@ COMMANDS: Dict[str, Tuple[str, str]] = {
     "human2smpl": ("scripts.infer.infer_point", "main"),
     "run-livehps": ("scripts.pipeline.run_livehps_pipeline", "main"),
     "run-feature-pipeline": ("scripts.pipeline.run_feature_pipeline", "main"),
+    "run-parser-pipeline": ("scripts.pipeline.run_parser_decoder_pipeline", "main"),
+    "run-parser-decoder": ("scripts.parser.run_parser_decoder", "main"),
+    "run-parser": ("scripts.parser.run_parser_decoder", "main"),
     "run-feature": ("scripts.infer.infer_feature_classifier", "main"),
     "train-feature": ("scripts.train.train_feature_classifier", "main"),
     "train-pointnet2": ("scripts.train.train_feature_classifier", "main"),
@@ -60,6 +63,8 @@ def print_help() -> None:
     print("  run-livehps (LiveHPS end-to-end)")
     print("  run-feature-pipeline (PointNet++ manifest/train/infer)")
     print("  run-feature (PointNet++ feature-only inference)")
+    print("  run-parser-pipeline (rule-based parser-decoder)")
+    print("  run-parser-decoder (point cloud -> part boxes -> labels)")
 
 
 def main() -> None:

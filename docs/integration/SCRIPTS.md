@@ -18,14 +18,19 @@ Canonical pipeline commands:
 - `run-livehps`: LiveHPS end-to-end 실행
 - `run-feature-pipeline`: PointNet++ manifest/train/infer 일괄 실행
 - `run-feature`: PointNet++ feature-only 추론 실행
+- `run-parser-pipeline`: rule-based parser-decoder 일괄 실행
+- `run-parser-decoder`: point cloud -> part boxes -> relation -> 15 labels
 
 PointNet++ train note:
-- `train-feature`는 기본으로 `weights/pointnet2/.../pointnet2_ssg_wo_normals_best_model.pth`를 encoder 초기화에 사용하고, 12-head는 새로 학습합니다.
+- `train-feature`는 기본으로 `weights/pointnet2/.../pointnet2_ssg_wo_normals_best_model.pth`를 encoder 초기화에 사용하고, 15-head는 새로 학습합니다.
+- 기본 학습 모드는 backbone freeze + head 교체(`freeze_backbone=true`)입니다.
 
 Pipeline modules:
 - `scripts/pipeline/run_livehps_pipeline.py`
 - `scripts/pipeline/run_feature_pipeline.py`
+- `scripts/pipeline/run_parser_decoder_pipeline.py`
 - `scripts/infer/infer_feature_classifier.py` (feature backend)
+- `scripts/parser/run_parser_decoder.py` (rule-based backend)
 
 Equivalent long-form names are also supported:
 - `pcap-to-pcd`, `pcd-to-human`, `human-to-smpl`

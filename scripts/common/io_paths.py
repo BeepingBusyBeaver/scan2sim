@@ -90,7 +90,16 @@ _define_paths(
     (*_OUTPUTS, "feature_models"),
     {
         "OUTPUTS_FEATURE_MODELS_DIR": (),
+        "OUTPUTS_FEATURE_POINTNET2_15HEAD_DIR": ("pointnet2_15head",),
         "OUTPUTS_FEATURE_POINTNET2_12HEAD_DIR": ("pointnet2_12head",),
+    },
+)
+
+_define_paths(
+    _SCOPE,
+    (*_OUTPUTS, "parser_label"),
+    {
+        "OUTPUTS_PARSER_LABEL_DIR": (),
     },
 )
 
@@ -157,6 +166,8 @@ _define_paths(
         "CONFIG_AXIS_STEPS_YAML": ("axis_steps.yaml",),
         "CONFIG_FEATURE_LABEL_RULES_JSON": ("feature", "label_rules.json",),
         "CONFIG_FEATURE_POINTNET2_YAML": ("feature", "pointnet2_multitask.yaml",),
+        "CONFIG_PARSER_PART_RULES_YAML": ("parser", "part_parser_rules.yaml",),
+        "CONFIG_PARSER_DECODER_RULES_YAML": ("parser", "label_decoder_rules.yaml",),
     },
 )
 
