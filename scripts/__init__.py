@@ -1,3 +1,4 @@
+# scripts/__init__.py
 """scan2sim script package.
 
 Entry points:

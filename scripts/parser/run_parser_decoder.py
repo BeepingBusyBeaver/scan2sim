@@ -1,3 +1,4 @@
+# scripts/parser/run_parser_decoder.py
 from __future__ import annotations
 
 import argparse
@@ -17,7 +18,7 @@ from scripts.common.pc_io import read_point_cloud_any
 from scripts.feature.heads import load_head_specs
 from scripts.parser.body_frame import BodyFrame, estimate_body_frame
 from scripts.parser.label_decoder import decode_labels, load_decoder_config
-from scripts.parser.part_parser import load_part_parser_config, parse_parts_from_points
+from scripts.parser.part_parser import DEFAULT_PART_ORDER, load_part_parser_config, parse_parts_from_points
 from scripts.parser.preprocess import preprocess_human_points
 from scripts.parser.relation_features import compute_relation_features
 
@@ -235,16 +236,16 @@ def _part_world_centers(parts: Mapping[str, Any], frame: BodyFrame) -> Dict[str,
 
 
 PART_COLORS: Dict[str, Tuple[float, float, float]] = {
-    "head": (0.96, 0.76, 0.17),
-    "torso": (0.24, 0.60, 0.96),
-    "left_upper_arm": (0.88, 0.33, 0.33),
-    "left_lower_arm": (0.76, 0.16, 0.16),
-    "right_upper_arm": (0.91, 0.48, 0.30),
-    "right_lower_arm": (0.80, 0.28, 0.12),
-    "left_thigh": (0.24, 0.72, 0.36),
-    "left_shin": (0.14, 0.58, 0.24),
-    "right_thigh": (0.20, 0.70, 0.58),
-    "right_shin": (0.08, 0.50, 0.38),
+    "head": (0.96, 0.76, 0.17),  # yellow
+    "torso": (0.24, 0.60, 0.96),  # blue
+    "left_upper_arm": (0.88, 0.33, 0.33),  # red
+    "left_lower_arm": (0.76, 0.16, 0.16),  # dark red
+    "right_upper_arm": (1.00, 0.55, 0.00),  # vivid orange
+    "right_lower_arm": (0.82, 0.35, 0.00),  # burnt orange
+    "left_thigh": (0.24, 0.72, 0.36),  # green
+    "left_shin": (0.14, 0.58, 0.24),  # dark green
+    "right_thigh": (0.65, 0.44, 0.95),  # violet
+    "right_shin": (0.43, 0.28, 0.82),  # indigo
 }
 
 
@@ -291,12 +292,95 @@ def _sample_edge_points(p0: np.ndarray, p1: np.ndarray, samples: int) -> np.ndar
     return p0[None, :] * (1.0 - t) + p1[None, :] * t
 
 
+def _assign_colors_from_part_points(
+    points_body: np.ndarray,
+    parts: Mapping[str, Any],
+    part_points: Mapping[str, np.ndarray],
+) -> np.ndarray:
+    color_default = np.array([0.60, 0.60, 0.60], dtype=np.float64)
+    colors = np.tile(color_default[None, :], (points_body.shape[0], 1))
+    fallback_max_distance = 0.08
+
+    lookup: Dict[Tuple[float, float, float], List[int]] = {}
+    for idx, row in enumerate(points_body):
+        key = (float(row[0]), float(row[1]), float(row[2]))
+        lookup.setdefault(key, []).append(idx)
+
+    candidate_parts: List[List[str]] = [[] for _ in range(points_body.shape[0])]
+    for name in DEFAULT_PART_ORDER:
+        pts = part_points.get(name)
+        if pts is None or pts.size == 0:
+            continue
+        for row in np.asarray(pts, dtype=np.float64):
+            key = (float(row[0]), float(row[1]), float(row[2]))
+            indices = lookup.get(key)
+            if not indices:
+                continue
+            for idx in indices:
+                if name not in candidate_parts[idx]:
+                    candidate_parts[idx].append(name)
+
+    for idx, names in enumerate(candidate_parts):
+        if not names:
+            continue
+        if len(names) == 1:
+            picked = names[0]
+        else:
+            point = points_body[idx]
+            best_name = names[0]
+            best_dist = np.inf
+            for name in names:
+                part_box = parts.get(name)
+                if part_box is None or not getattr(part_box, "valid", False):
+                    continue
+                center_xyz = np.asarray(getattr(part_box, "center_xyz"), dtype=np.float64)
+                dist = float(np.linalg.norm(point - center_xyz))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_name = name
+            picked = best_name
+        colors[idx] = np.array(PART_COLORS.get(picked, (0.95, 0.95, 0.95)), dtype=np.float64)
+
+    fallback_boxes: List[Tuple[str, np.ndarray, np.ndarray, np.ndarray]] = []
+    for name in DEFAULT_PART_ORDER:
+        part_box = parts.get(name)
+        if part_box is None or not getattr(part_box, "valid", False):
+            continue
+        min_xyz = np.asarray(getattr(part_box, "min_xyz"), dtype=np.float64)
+        max_xyz = np.asarray(getattr(part_box, "max_xyz"), dtype=np.float64)
+        center_xyz = np.asarray(getattr(part_box, "center_xyz"), dtype=np.float64)
+        fallback_boxes.append((name, min_xyz, max_xyz, center_xyz))
+
+    if fallback_boxes:
+        for idx, names in enumerate(candidate_parts):
+            if names:
+                continue
+            point = points_body[idx]
+            best_name: str | None = None
+            best_score = np.inf
+            for name, min_xyz, max_xyz, center_xyz in fallback_boxes:
+                outside = np.maximum(np.maximum(min_xyz - point, point - max_xyz), 0.0)
+                dist_out = float(np.linalg.norm(outside))
+                if dist_out > fallback_max_distance:
+                    continue
+                center_dist = float(np.linalg.norm(point - center_xyz))
+                size = float(np.linalg.norm(max_xyz - min_xyz))
+                score = dist_out + 0.04 * center_dist / max(size, 1e-6)
+                if score < best_score:
+                    best_score = score
+                    best_name = name
+            if best_name is not None:
+                colors[idx] = np.array(PART_COLORS.get(best_name, (0.95, 0.95, 0.95)), dtype=np.float64)
+    return colors
+
+
 def _write_part_visualization(
     *,
     point_path: Path,
     points_body: np.ndarray,
     body_frame: BodyFrame,
     parts: Mapping[str, Any],
+    part_points: Mapping[str, np.ndarray] | None,
     viz_dir: Path,
     write_lines: bool,
 ) -> Dict[str, Any]:
@@ -304,9 +388,12 @@ def _write_part_visualization(
     stem = point_path.stem
 
     points_world = body_frame.body_to_world(points_body)
-    color_default = np.array([0.60, 0.60, 0.60], dtype=np.float64)
-    colors = np.tile(color_default[None, :], (points_body.shape[0], 1))
-    best_dist = np.full((points_body.shape[0],), np.inf, dtype=np.float64)
+    if part_points is not None:
+        colors = _assign_colors_from_part_points(points_body, parts, part_points)
+    else:
+        color_default = np.array([0.60, 0.60, 0.60], dtype=np.float64)
+        colors = np.tile(color_default[None, :], (points_body.shape[0], 1))
+    best_dist = np.full((points_body.shape[0],), np.inf, dtype=np.float64) if part_points is None else None
 
     boxes_json: Dict[str, Any] = {}
     wire_points: List[np.ndarray] = []
@@ -321,22 +408,31 @@ def _write_part_visualization(
         min_xyz = np.asarray(getattr(part_box, "min_xyz"), dtype=np.float64)
         max_xyz = np.asarray(getattr(part_box, "max_xyz"), dtype=np.float64)
         center_xyz = np.asarray(getattr(part_box, "center_xyz"), dtype=np.float64)
+        obb_center_xyz = np.asarray(getattr(part_box, "obb_center_xyz", center_xyz), dtype=np.float64)
 
-        inside = np.all((points_body >= (min_xyz[None, :] - 1e-9)) & (points_body <= (max_xyz[None, :] + 1e-9)), axis=1)
-        if np.any(inside):
-            indices = np.flatnonzero(inside)
-            dist = np.linalg.norm(points_body[indices] - center_xyz[None, :], axis=1)
-            better = dist < best_dist[indices]
-            if np.any(better):
-                selected = indices[better]
-                colors[selected] = color[None, :]
-                best_dist[selected] = dist[better]
+        if part_points is None:
+            assert best_dist is not None
+            inside = np.all((points_body >= (min_xyz[None, :] - 1e-9)) & (points_body <= (max_xyz[None, :] + 1e-9)), axis=1)
+            if np.any(inside):
+                indices = np.flatnonzero(inside)
+                dist = np.linalg.norm(points_body[indices] - center_xyz[None, :], axis=1)
+                better = dist < best_dist[indices]
+                if np.any(better):
+                    selected = indices[better]
+                    colors[selected] = color[None, :]
+                    best_dist[selected] = dist[better]
 
-        corners_body = _box_corners(min_xyz, max_xyz)
+        corners_body_raw = getattr(part_box, "obb_corners_xyz", None)
+        if corners_body_raw is None:
+            corners_body = _box_corners(min_xyz, max_xyz)
+        else:
+            corners_body = np.asarray(corners_body_raw, dtype=np.float64)
+            if corners_body.shape != (8, 3):
+                corners_body = _box_corners(min_xyz, max_xyz)
         corners_world = body_frame.body_to_world(corners_body)
         boxes_json[name] = {
             "color_rgb": [float(v) for v in color.tolist()],
-            "center_world": _body_to_world_point(body_frame, center_xyz),
+            "center_world": _body_to_world_point(body_frame, obb_center_xyz),
             "corners_world": [[float(v) for v in row] for row in corners_world.tolist()],
         }
 
@@ -467,6 +563,7 @@ def main(argv: List[str] | None = None) -> None:
     parser_state: Dict[str, Any] | None = None
     relation_state: Dict[str, Any] | None = None
     decoder_state: Dict[str, Any] | None = None
+    prev_body_frame: BodyFrame | None = None
     pred_rows: List[Tuple[int, Dict[str, Any]]] = []
     for point_path in input_paths:
         cloud = read_point_cloud_any(point_path)
@@ -476,10 +573,24 @@ def main(argv: List[str] | None = None) -> None:
         points_pre, preprocess_meta = preprocess_human_points(points_world, preprocess_cfg)
 
         body_frame_cfg = part_cfg.get("body_frame", {}) if isinstance(part_cfg, Mapping) else {}
-        body_frame, body_meta = estimate_body_frame(points_pre, body_frame_cfg)
+        if not isinstance(body_frame_cfg, Mapping):
+            body_frame_cfg = {}
+        body_frame_cfg_run: Dict[str, Any] = dict(body_frame_cfg)
+        if prev_body_frame is not None:
+            continuity_cfg_raw = body_frame_cfg_run.get("continuity", {})
+            continuity_cfg: Dict[str, Any]
+            if isinstance(continuity_cfg_raw, Mapping):
+                continuity_cfg = dict(continuity_cfg_raw)
+            else:
+                continuity_cfg = {}
+            if bool(continuity_cfg.get("enabled", True)):
+                continuity_cfg["prev_axes_world"] = prev_body_frame.axes_world
+                body_frame_cfg_run["continuity"] = continuity_cfg
+        body_frame, body_meta = estimate_body_frame(points_pre, body_frame_cfg_run)
+        prev_body_frame = body_frame
         points_body = body_frame.world_to_body(points_pre)
 
-        parts, parse_meta, _, parser_state = parse_parts_from_points(
+        parts, parse_meta, parsed_part_points, parser_state = parse_parts_from_points(
             points_body,
             part_cfg,
             prev_state=parser_state,
@@ -515,6 +626,7 @@ def main(argv: List[str] | None = None) -> None:
                 points_body=points_body,
                 body_frame=body_frame,
                 parts=parts,
+                part_points=parsed_part_points,
                 viz_dir=viz_dir,
                 write_lines=bool(args.viz_write_lines),
             )

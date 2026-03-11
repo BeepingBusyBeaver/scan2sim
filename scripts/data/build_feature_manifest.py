@@ -1,3 +1,4 @@
+# scripts/data/build_feature_manifest.py
 from __future__ import annotations
 
 import argparse

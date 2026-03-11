@@ -1,3 +1,4 @@
+# scripts/feature/pointnet2_multitask.py
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -209,4 +210,3 @@ def build_model_from_config(
         head_hidden=int(model_cfg.get("head_hidden", 256)),
         head_dropout=float(model_cfg.get("head_dropout", 0.2)),
     )
-

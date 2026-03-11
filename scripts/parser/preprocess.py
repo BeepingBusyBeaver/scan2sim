@@ -1,3 +1,4 @@
+# scripts/parser/preprocess.py
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Tuple
@@ -97,4 +98,3 @@ def preprocess_human_points(points: np.ndarray, config: Mapping[str, Any] | None
         out = points.astype(np.float64)
     stats["output_points"] = int(out.shape[0])
     return out, stats
-

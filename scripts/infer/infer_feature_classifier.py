@@ -1,3 +1,4 @@
+# scripts/infer/infer_feature_classifier.py
 from __future__ import annotations
 
 import argparse

@@ -1,3 +1,4 @@
+# scripts/feature/losses.py
 from __future__ import annotations
 
 from typing import Dict, Sequence, Tuple
@@ -76,4 +77,3 @@ def compute_multitask_loss(
 
     assert total_loss is not None
     return total_loss, loss_detail, acc_detail
-

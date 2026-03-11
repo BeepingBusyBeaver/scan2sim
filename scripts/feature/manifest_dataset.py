@@ -1,3 +1,4 @@
+# scripts/feature/manifest_dataset.py
 from __future__ import annotations
 
 import json
@@ -232,4 +233,3 @@ def collect_point_paths(paths: Iterable[Path]) -> List[Path]:
     out = [path.resolve() for path in paths if path.is_file()]
     out.sort(key=lambda path: path.name)
     return out
-

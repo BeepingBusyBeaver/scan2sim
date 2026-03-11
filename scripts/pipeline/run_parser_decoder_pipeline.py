@@ -1,3 +1,4 @@
+# scripts/pipeline/run_parser_decoder_pipeline.py
 from __future__ import annotations
 
 import argparse
@@ -17,7 +18,8 @@ python -m scripts run-parser-pipeline \
   --extract-bg data/real/SQUAT/raw/SQUAT_bg.pcd \
   --output-dir outputs/SQUAT/parser_label \
   --viz-dir outputs/SQUAT/parser_viz \
-  --viz-write-lines \
+  --viz-write-lines
+
   --gt-jsonl data/feature/SQUAT_label_GT.jsonl
 """
 
@@ -157,7 +159,7 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--extract-bg", type=str, default=None, help="Background point cloud path for extract-person.")
     parser.add_argument("--extract-out-dir", type=str, default="data/interim/parser_human", help="Human cloud output dir for extract-person.")
     parser.add_argument("--extract-output-pattern", type=str, default="human_*.ply", help="Parser input pattern after extract-person.")
-    parser.add_argument("--extract-max-range", type=float, default=4.0)
+    parser.add_argument("--extract-max-range", type=float, default=5.0)
     parser.add_argument("--extract-bg-thresh", type=float, default=0.05)
     parser.add_argument("--extract-post-bg-thresh", type=float, default=0.0)
     parser.add_argument("--extract-cluster-eps", type=float, default=0.012)
@@ -173,10 +175,12 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--extract-y-max", type=float, default=0.6)
     parser.add_argument("--extract-z-min", type=float, default=-0.73)
     parser.add_argument("--extract-debug-dir", type=str, default="data/interim/debug_extract_person")
-    parser.add_argument("--extract-bg-icp", action="store_true", help="Enable BG ICP in extract-person.")
+    parser.add_argument("--extract-bg-icp", dest="extract_bg_icp", action="store_true", help="Enable BG ICP in extract-person.")
+    parser.add_argument("--no-extract-bg-icp", dest="extract_bg_icp", action="store_false", help="Disable BG ICP in extract-person.")
     parser.add_argument("--extract-no-pcd-transform", action="store_true", help="Disable transform stage in extract-person.")
     parser.add_argument("--python", type=str, default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
+    parser.set_defaults(extract_bg_icp=True)
     return parser.parse_args(argv)
 
 

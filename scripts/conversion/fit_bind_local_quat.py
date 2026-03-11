@@ -1,3 +1,4 @@
+# scripts/conversion/fit_bind_local_quat.py
 import argparse
 import math
 import re

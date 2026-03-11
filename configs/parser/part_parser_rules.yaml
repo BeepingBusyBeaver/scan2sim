@@ -15,23 +15,84 @@ preprocess:
     camera_offset: [0.0, 0.0, 1.0]
 
 body_frame:
-  world_up: [0.0, 1.0, 0.0]
+  world_up_mode: auto
+  world_up: [0.0, 0.0, 1.0]
+  auto_up:
+    span_quantiles: [0.05, 0.95]
+    align_weight: 0.10
+    candidate_axes:
+      - [1.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0]
+      - [0.0, 0.0, 1.0]
+  continuity:
+    enabled: true
 
 parser:
   left_is_positive_x: true
   min_points_per_part: 6
   torso:
     y_range: [0.44, 0.80]
-    x_scale: 1.2
+    x_scale: 1.05
+    z_scale: 1.9
+    x_percentile: 70.0
+    z_percentile: 80.0
+    limb_exclusion:
+      enabled: true
+      assign_to_torso: true
+      y_pad: 0.08
+      x_scale: 1.55
+      z_scale: 1.30
   head:
     y_range: [0.78, 1.02]
-    x_scale: 1.25
+    x_scale: 1.15
+    z_scale: 1.7
+    center_keep_quantile: 0.55
+    max_radius: 1.0
   arm:
     y_range: [0.36, 0.84]
-    side_min_scale: 0.45
+    side_min_scale: 0.25
   leg:
     y_range: [0.00, 0.46]
-    side_min_scale: 0.10
+    side_min_scale: 0.12
+  limb_assignment:
+    shoulder_quantile: 0.80
+    hip_quantile: 0.20
+    arm_vertical_penalty: 0.90
+    leg_vertical_penalty: 0.90
+    min_side_scale: 0.08
+    y_prior_weight: 0.70
+    top_arm_seed_fraction: 0.12
+    bottom_leg_seed_fraction: 0.18
+    cluster_eps: 0.085
+    cluster_min_points: 6
+    seed_conf_fraction: 0.10
+    geodesic_k: 10
+    geodesic_radius_scale: 1.8
+    geodesic_score_weight: 0.35
+  segment_split:
+    arm_prox_quantile: 0.55
+    leg_prox_quantile: 0.50
+  part_grouping:
+    enabled: true
+    cluster_eps: 0.070
+    cluster_min_points: 6
+    noise_attach_radius: 0.045
+    min_keep_ratio: 0.50
+    secondary_center_radius: 0.10
+  hierarchy:
+    head_arm_guard:
+      enabled: true
+      y_pad: 0.03
+      radius_scale_x: 1.25
+      radius_scale_y: 1.15
+      radius_scale_z: 1.25
+  box_postprocess:
+    enabled: true
+    allow_small_parts: true
+    small_part_min_size: 0.025
+    robust_quantile: 0.05
+    contact_margin: 0.003
+    forbidden_margin: 0.003
   continuity:
     enabled: true
     blend_with_prev: 0.15
