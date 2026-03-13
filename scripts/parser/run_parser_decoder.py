@@ -70,6 +70,53 @@ def _numeric_suffix(text: str) -> int | None:
     return int(match.group(1))
 
 
+def _stem_prefix_without_index(stem: str) -> str:
+    stripped = re.sub(r"[_\-\s]*\d+$", "", stem).strip("_- ")
+    return stripped if stripped else stem
+
+
+def _sequence_key(path: Path, mode: str, regex_pattern: re.Pattern[str] | None) -> str:
+    if mode == "single":
+        return "single"
+    if mode == "parent":
+        return str(path.parent.resolve())
+    if mode == "prefix":
+        return _stem_prefix_without_index(path.stem)
+    if mode == "regex" and regex_pattern is not None:
+        matched = regex_pattern.search(str(path))
+        if matched is not None:
+            if matched.lastindex and matched.lastindex > 0:
+                groups = [g for g in matched.groups() if g]
+                if groups:
+                    return "|".join(groups)
+            token = matched.group(0).strip()
+            if token:
+                return token
+    auto_prefix = _stem_prefix_without_index(path.stem)
+    return f"{path.parent.resolve()}::{auto_prefix}"
+
+
+def _should_reset_sequence(
+    *,
+    prev_sequence_key: str | None,
+    sequence_key: str,
+    prev_numeric_key: int | None,
+    numeric_key: int | None,
+    gap_reset: int,
+) -> bool:
+    if prev_sequence_key is None:
+        return False
+    if sequence_key != prev_sequence_key:
+        return True
+    if int(gap_reset) <= 0:
+        return False
+    if prev_numeric_key is None or numeric_key is None:
+        return False
+    if numeric_key <= prev_numeric_key:
+        return True
+    return (numeric_key - prev_numeric_key) > int(gap_reset)
+
+
 def _normalize_label_value(value: Any) -> Any:
     if isinstance(value, bool):
         return int(value)
@@ -233,6 +280,136 @@ def _part_world_centers(parts: Mapping[str, Any], frame: BodyFrame) -> Dict[str,
             continue
         out[name] = _body_to_world_point(frame, np.asarray(center, dtype=np.float64))
     return out
+
+
+def _default_part_track_ids() -> Dict[str, int]:
+    return {name: idx for idx, name in enumerate(DEFAULT_PART_ORDER)}
+
+
+def _update_part_tracks(
+    *,
+    part_names: Sequence[str],
+    observed_centers: Mapping[str, List[float]],
+    state: Mapping[str, Any] | None,
+    track_ids: Mapping[str, int],
+    velocity_alpha: float,
+    max_missed: int,
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any], Dict[str, List[float]]]:
+    alpha = float(np.clip(velocity_alpha, 0.0, 1.0))
+    max_missed_int = max(0, int(max_missed))
+
+    prev_state = state if isinstance(state, Mapping) else {}
+    next_state: Dict[str, Any] = {}
+    tracks: Dict[str, Dict[str, Any]] = {}
+    tracked_centers: Dict[str, List[float]] = {}
+
+    for name in part_names:
+        track_id = int(track_ids.get(name, -1))
+        row = prev_state.get(name)
+        row_map = row if isinstance(row, Mapping) else {}
+
+        prev_center_raw = row_map.get("center_world")
+        prev_velocity_raw = row_map.get("velocity_world")
+        prev_center = (
+            np.asarray(prev_center_raw, dtype=np.float64)
+            if isinstance(prev_center_raw, (list, tuple)) and len(prev_center_raw) == 3
+            else None
+        )
+        prev_velocity = (
+            np.asarray(prev_velocity_raw, dtype=np.float64)
+            if isinstance(prev_velocity_raw, (list, tuple)) and len(prev_velocity_raw) == 3
+            else np.zeros((3,), dtype=np.float64)
+        )
+        prev_age = int(row_map.get("age", 0))
+        prev_missed = int(row_map.get("missed", 0))
+
+        observed = observed_centers.get(name)
+        if isinstance(observed, (list, tuple)) and len(observed) == 3:
+            observed_center = np.asarray(observed, dtype=np.float64)
+            if prev_center is None:
+                predicted_center = observed_center
+                velocity = np.zeros((3,), dtype=np.float64)
+                innovation = np.zeros((3,), dtype=np.float64)
+                age = 1
+            else:
+                predicted_center = prev_center + prev_velocity
+                innovation = observed_center - predicted_center
+                velocity = (1.0 - alpha) * prev_velocity + alpha * (observed_center - prev_center)
+                age = prev_age + 1
+            next_state[name] = {
+                "track_id": track_id,
+                "center_world": [float(v) for v in observed_center.tolist()],
+                "velocity_world": [float(v) for v in velocity.tolist()],
+                "age": int(age),
+                "missed": 0,
+            }
+            tracks[name] = {
+                "track_id": track_id,
+                "source": "observed",
+                "age": int(age),
+                "missed": 0,
+                "center_world": [float(v) for v in observed_center.tolist()],
+                "predicted_world": [float(v) for v in predicted_center.tolist()],
+                "innovation_norm": float(np.linalg.norm(innovation)),
+            }
+            tracked_centers[name] = [float(v) for v in observed_center.tolist()]
+            continue
+
+        if prev_center is not None and prev_missed < max_missed_int:
+            predicted_center = prev_center + prev_velocity
+            missed = prev_missed + 1
+            age = prev_age + 1
+            next_state[name] = {
+                "track_id": track_id,
+                "center_world": [float(v) for v in predicted_center.tolist()],
+                "velocity_world": [float(v) for v in prev_velocity.tolist()],
+                "age": int(age),
+                "missed": int(missed),
+            }
+            tracks[name] = {
+                "track_id": track_id,
+                "source": "predicted",
+                "age": int(age),
+                "missed": int(missed),
+                "center_world": [float(v) for v in predicted_center.tolist()],
+                "predicted_world": [float(v) for v in predicted_center.tolist()],
+                "innovation_norm": None,
+            }
+            tracked_centers[name] = [float(v) for v in predicted_center.tolist()]
+            continue
+
+        if prev_center is not None:
+            age = prev_age + 1
+            missed = prev_missed + 1
+            next_state[name] = {
+                "track_id": track_id,
+                "center_world": [float(v) for v in prev_center.tolist()],
+                "velocity_world": [0.0, 0.0, 0.0],
+                "age": int(age),
+                "missed": int(missed),
+            }
+            tracks[name] = {
+                "track_id": track_id,
+                "source": "missing",
+                "age": int(age),
+                "missed": int(missed),
+                "center_world": None,
+                "predicted_world": [float(v) for v in prev_center.tolist()],
+                "innovation_norm": None,
+            }
+            continue
+
+        tracks[name] = {
+            "track_id": track_id,
+            "source": "missing",
+            "age": 0,
+            "missed": 0,
+            "center_world": None,
+            "predicted_world": None,
+            "innovation_norm": None,
+        }
+
+    return tracks, next_state, tracked_centers
 
 
 PART_COLORS: Dict[str, Tuple[float, float, float]] = {
@@ -527,6 +704,50 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Also export part box line-set PLY when --viz-dir is set.",
     )
+    parser.add_argument(
+        "--sequence-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "single", "parent", "prefix", "regex"],
+        help="How to split input stream into sequences for temporal state reset.",
+    )
+    parser.add_argument(
+        "--sequence-regex",
+        type=str,
+        default=None,
+        help="Regex for --sequence-mode regex. First capture group is used as sequence key.",
+    )
+    parser.add_argument(
+        "--sequence-gap-reset",
+        type=int,
+        default=0,
+        help="Reset temporal state when numeric suffix gap is larger than this value (0 disables).",
+    )
+    parser.add_argument(
+        "--track-parts",
+        dest="track_parts",
+        action="store_true",
+        help="Enable semantic part ID tracker.",
+    )
+    parser.add_argument(
+        "--no-track-parts",
+        dest="track_parts",
+        action="store_false",
+        help="Disable semantic part ID tracker.",
+    )
+    parser.add_argument(
+        "--track-max-missed",
+        type=int,
+        default=3,
+        help="Max consecutive missed frames for predicted track center propagation.",
+    )
+    parser.add_argument(
+        "--track-velocity-alpha",
+        type=float,
+        default=0.45,
+        help="EMA alpha for track velocity update from observed centers.",
+    )
+    parser.set_defaults(track_parts=True)
     return parser.parse_args(argv)
 
 
@@ -559,13 +780,56 @@ def main(argv: List[str] | None = None) -> None:
     print(f"[parser-decoder] decoder_config={decoder_config_path}")
     print(f"[parser-decoder] profile={decoder_cfg.get('selected_profile', 'unknown')}")
     print(f"[parser-decoder] profile_source={profile_source}")
+    print(f"[parser-decoder] sequence_mode={args.sequence_mode} gap_reset={int(args.sequence_gap_reset)}")
+    print(f"[parser-decoder] part_tracker={'on' if args.track_parts else 'off'}")
 
     parser_state: Dict[str, Any] | None = None
     relation_state: Dict[str, Any] | None = None
     decoder_state: Dict[str, Any] | None = None
     prev_body_frame: BodyFrame | None = None
+    part_track_state: Dict[str, Any] | None = None
+    part_track_ids = _default_part_track_ids()
+    sequence_regex = re.compile(args.sequence_regex) if args.sequence_mode == "regex" and args.sequence_regex else None
+    current_sequence_key: str | None = None
+    current_sequence_id = -1
+    current_sequence_frame_index = -1
+    prev_numeric_key: int | None = None
     pred_rows: List[Tuple[int, Dict[str, Any]]] = []
+    used_output_names: set[str] = set()
+    written_count = 0
+    first_output_path: Path | None = None
+    last_output_path: Path | None = None
     for point_path in input_paths:
+        numeric_key = _numeric_suffix(point_path.stem)
+        sequence_key = _sequence_key(point_path, args.sequence_mode, sequence_regex)
+        sequence_reset = _should_reset_sequence(
+            prev_sequence_key=current_sequence_key,
+            sequence_key=sequence_key,
+            prev_numeric_key=prev_numeric_key,
+            numeric_key=numeric_key,
+            gap_reset=int(args.sequence_gap_reset),
+        )
+        if current_sequence_key is None:
+            current_sequence_id = 0
+            current_sequence_frame_index = 0
+        elif sequence_reset:
+            parser_state = None
+            relation_state = None
+            decoder_state = None
+            prev_body_frame = None
+            part_track_state = None
+            current_sequence_id += 1
+            current_sequence_frame_index = 0
+            print(
+                f"[parser-decoder] sequence_reset id={current_sequence_id} "
+                f"key={sequence_key} file={point_path.name}"
+            )
+        else:
+            current_sequence_frame_index += 1
+        current_sequence_key = sequence_key
+        if numeric_key is not None:
+            prev_numeric_key = numeric_key
+
         cloud = read_point_cloud_any(point_path)
         points_world = np.asarray(cloud.points, dtype=np.float64)
 
@@ -618,6 +882,17 @@ def main(argv: List[str] | None = None) -> None:
             )
 
         part_world_centers = _part_world_centers(parts, body_frame)
+        part_tracks: Dict[str, Dict[str, Any]] = {}
+        part_world_centers_tracked: Dict[str, List[float]] = {}
+        if args.track_parts:
+            part_tracks, part_track_state, part_world_centers_tracked = _update_part_tracks(
+                part_names=DEFAULT_PART_ORDER,
+                observed_centers=part_world_centers,
+                state=part_track_state,
+                track_ids=part_track_ids,
+                velocity_alpha=float(args.track_velocity_alpha),
+                max_missed=int(args.track_max_missed),
+            )
         step_vector = [labels.get(head_name, 0) for head_name in head_names]
         visualization = None
         if viz_dir is not None:
@@ -653,6 +928,14 @@ def main(argv: List[str] | None = None) -> None:
                         and isinstance(decoder_cfg.get("temporal"), Mapping)
                         and decoder_cfg.get("temporal", {}).get("enabled", False)
                     ),
+                    "stage_h_part_id_tracker": bool(args.track_parts),
+                },
+                "sequence": {
+                    "mode": args.sequence_mode,
+                    "key": sequence_key,
+                    "id": int(current_sequence_id),
+                    "frame_index": int(current_sequence_frame_index),
+                    "reset": bool(sequence_reset),
                 },
                 "visualization": visualization,
             },
@@ -663,6 +946,8 @@ def main(argv: List[str] | None = None) -> None:
             },
             "parts_body": {name: parts[name].to_jsonable() for name in sorted(parts.keys())},
             "parts_world_centers": part_world_centers,
+            "parts_world_centers_tracked": part_world_centers_tracked,
+            "part_tracks": part_tracks,
             "relations": relation_obj.get("pair_features", {}),
             "derived_features": relation_obj.get("derived_features", {}),
             "feature_map": feature_map,
@@ -672,18 +957,49 @@ def main(argv: List[str] | None = None) -> None:
             "parse_meta": parse_meta,
         }
         output_name = f"{args.output_prefix}{point_path.stem}.json"
+        if output_name in used_output_names:
+            output_name = (
+                f"{args.output_prefix}{point_path.stem}"
+                f"__seq{int(current_sequence_id):03d}_f{int(current_sequence_frame_index):04d}.json"
+            )
+            duplicate_idx = 1
+            while output_name in used_output_names:
+                output_name = (
+                    f"{args.output_prefix}{point_path.stem}"
+                    f"__seq{int(current_sequence_id):03d}_f{int(current_sequence_frame_index):04d}"
+                    f"_{duplicate_idx:02d}.json"
+                )
+                duplicate_idx += 1
+        used_output_names.add(output_name)
         output_path = output_dir / output_name
         write_json(output_path, payload, ascii_flag=False, compact=False)
-        print(f"[parser-decoder] wrote {output_path}")
+        written_count += 1
+        if first_output_path is None:
+            first_output_path = output_path
+        last_output_path = output_path
 
-        key = _numeric_suffix(point_path.stem)
-        if key is not None:
-            pred_rows.append((key, labels))
+        if numeric_key is not None:
+            pred_rows.append((numeric_key, labels))
+
+    if written_count > 0:
+        first_name = first_output_path.name if first_output_path is not None else ""
+        last_name = last_output_path.name if last_output_path is not None else ""
+        print(
+            f"[parser-decoder] wrote {written_count} files -> {output_dir} "
+            f"(first={first_name}, last={last_name})"
+        )
 
     if args.gt_jsonl:
         gt_jsonl_path = resolve_repo_path(root, args.gt_jsonl)
         if not pred_rows:
             raise ValueError("No numeric prediction keys found for GT evaluation.")
+        unique_pred_keys = {key for key, _ in pred_rows}
+        if len(unique_pred_keys) != len(pred_rows):
+            print(
+                "[parser-decoder][eval] skipped: duplicate numeric frame indices detected "
+                "(multiple sequences). Run per sequence for GT evaluation."
+            )
+            return
         _evaluate_predictions(
             pred_rows=pred_rows,
             gt_jsonl_path=gt_jsonl_path,

@@ -20,6 +20,10 @@ COMMANDS: Dict[str, Tuple[str, str]] = {
     "run-parser-pipeline": ("scripts.pipeline.run_parser_decoder_pipeline", "main"),
     "run-parser-decoder": ("scripts.parser.run_parser_decoder", "main"),
     "run-parser": ("scripts.parser.run_parser_decoder", "main"),
+    "build-parser-playback": ("scripts.parser.build_parser_playback", "main"),
+    "build-playback": ("scripts.parser.build_parser_playback", "main"),
+    "play-parser-playback": ("scripts.parser.play_parser_playback", "main"),
+    "play-playback": ("scripts.parser.play_parser_playback", "main"),
     "run-feature": ("scripts.infer.infer_feature_classifier", "main"),
     "train-feature": ("scripts.train.train_feature_classifier", "main"),
     "train-pointnet2": ("scripts.train.train_feature_classifier", "main"),
@@ -65,6 +69,8 @@ def print_help() -> None:
     print("  run-feature (PointNet++ feature-only inference)")
     print("  run-parser-pipeline (rule-based parser-decoder)")
     print("  run-parser-decoder (point cloud -> part boxes -> labels)")
+    print("  build-parser-playback (PLY sequence -> compressed playback NPZ)")
+    print("  play-parser-playback (NPZ playback in Open3D viewer)")
 
 
 def main() -> None:

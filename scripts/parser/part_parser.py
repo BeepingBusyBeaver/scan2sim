@@ -87,6 +87,11 @@ def _default_config() -> Dict[str, Any]:
                 "noise_attach_radius": 0.045,
                 "min_keep_ratio": 0.50,
                 "secondary_center_radius": 0.10,
+                "distal_min_keep_ratio": 0.35,
+                "distal_secondary_center_radius": 0.06,
+                "distal_noise_attach_radius": 0.025,
+                "distal_fallback_to_input": True,
+                "distal_max_anchor_quantile": 0.90,
             },
             "hierarchy": {
                 "head_arm_guard": {
@@ -102,7 +107,7 @@ def _default_config() -> Dict[str, Any]:
                 "allow_small_parts": True,
                 "small_part_min_size": 0.025,
                 "robust_quantile": 0.03,
-                "contact_margin": 0.003,
+                "contact_margin": 0.0,
                 "forbidden_margin": 0.003,
             },
             "continuity": {
@@ -496,6 +501,7 @@ def _filter_part_component_by_anchor(
     noise_attach_radius: float,
     min_keep_ratio: float,
     secondary_center_radius: float,
+    fallback_to_input: bool = True,
 ) -> np.ndarray:
     if points.shape[0] <= max(3, int(min_points)):
         return points
@@ -549,8 +555,34 @@ def _filter_part_component_by_anchor(
 
     min_required = max(int(min_points), int(np.ceil(n_total * 0.35)))
     if selected.shape[0] < min_required:
-        return points
+        if fallback_to_input:
+            return points
+        min_selected = max(2, min(int(min_points), 4))
+        if selected.shape[0] >= min_selected:
+            return selected
+        return _empty_points()
     return selected
+
+
+def _trim_far_points_from_anchor(
+    points: np.ndarray,
+    anchor: np.ndarray,
+    *,
+    max_anchor_quantile: float,
+    min_keep_ratio: float,
+    min_points: int,
+) -> np.ndarray:
+    if points.shape[0] <= max(3, int(min_points)):
+        return points
+    d = np.linalg.norm(points - anchor[None, :], axis=1)
+    q = float(np.clip(max_anchor_quantile, 0.50, 0.99))
+    threshold = float(np.quantile(d, q))
+    keep = d <= (threshold + 1e-9)
+    filtered = points[keep]
+    min_keep = max(int(min_points), int(np.ceil(points.shape[0] * float(np.clip(min_keep_ratio, 0.20, 0.95)))))
+    if filtered.shape[0] < min_keep:
+        return points
+    return filtered
 
 
 def _exclude_head_zone_from_limbs(
@@ -675,6 +707,11 @@ _PARENT_CHILD_LINKS: Tuple[Tuple[str, str], ...] = (
     ("right_shin", "right_thigh"),
 )
 
+_SHIFT_CONTACT_LINKS: Tuple[Tuple[str, str], ...] = (
+    ("left_lower_arm", "left_upper_arm"),
+    ("right_lower_arm", "right_upper_arm"),
+)
+
 _FORBIDDEN_CONTACTS: Dict[str, Tuple[str, ...]] = {
     "left_lower_arm": ("torso",),
     "right_lower_arm": ("torso",),
@@ -699,7 +736,7 @@ def _build_box_from_bounds(
     )
 
 
-def _touch_child_to_parent(child: PartBox, parent: PartBox, margin: float) -> PartBox:
+def _touch_child_to_parent_expand(child: PartBox, parent: PartBox, margin: float) -> PartBox:
     if not child.valid or not parent.valid:
         return child
     cmin = child.min_xyz.copy()
@@ -711,6 +748,26 @@ def _touch_child_to_parent(child: PartBox, parent: PartBox, margin: float) -> Pa
             cmax[axis] = pmin[axis] + margin
         elif pmax[axis] + margin < cmin[axis]:
             cmin[axis] = pmax[axis] - margin
+    cmax = np.maximum(cmax, cmin + 1e-6)
+    return _build_box_from_bounds(child.name, child.num_points, cmin, cmax, template=child)
+
+
+def _touch_child_to_parent_shift(child: PartBox, parent: PartBox, margin: float) -> PartBox:
+    if not child.valid or not parent.valid:
+        return child
+    cmin = child.min_xyz.copy()
+    cmax = child.max_xyz.copy()
+    pmin = parent.min_xyz
+    pmax = parent.max_xyz
+    shift = np.zeros((3,), dtype=np.float64)
+    for axis in range(3):
+        if cmax[axis] + margin < pmin[axis]:
+            shift[axis] = pmin[axis] - (cmax[axis] + margin)
+        elif pmax[axis] + margin < cmin[axis]:
+            shift[axis] = (pmax[axis] + margin) - cmin[axis]
+    if np.any(np.abs(shift) > 0.0):
+        cmin = cmin + shift
+        cmax = cmax + shift
     cmax = np.maximum(cmax, cmin + 1e-6)
     return _build_box_from_bounds(child.name, child.num_points, cmin, cmax, template=child)
 
@@ -745,13 +802,17 @@ def _enforce_box_hierarchy(
     forbidden_margin: float,
 ) -> Dict[str, PartBox]:
     out = dict(boxes)
+    shift_links = set(_SHIFT_CONTACT_LINKS)
     for _ in range(2):
         for child_name, parent_name in _PARENT_CHILD_LINKS:
             child = out.get(child_name)
             parent = out.get(parent_name)
             if child is None or parent is None:
                 continue
-            out[child_name] = _touch_child_to_parent(child, parent, margin=contact_margin)
+            if (child_name, parent_name) in shift_links:
+                out[child_name] = _touch_child_to_parent_shift(child, parent, margin=contact_margin)
+            else:
+                out[child_name] = _touch_child_to_parent_expand(child, parent, margin=contact_margin)
         for child_name, forbidden_list in _FORBIDDEN_CONTACTS.items():
             child = out.get(child_name)
             if child is None or not child.valid:
@@ -762,6 +823,15 @@ def _enforce_box_hierarchy(
                     continue
                 child = _separate_forbidden(child, other, margin=forbidden_margin)
             out[child_name] = child
+    for child_name, parent_name in _PARENT_CHILD_LINKS:
+        child = out.get(child_name)
+        parent = out.get(parent_name)
+        if child is None or parent is None:
+            continue
+        if (child_name, parent_name) in shift_links:
+            out[child_name] = _touch_child_to_parent_shift(child, parent, margin=contact_margin)
+        else:
+            out[child_name] = _touch_child_to_parent_expand(child, parent, margin=contact_margin)
     return out
 
 
@@ -862,6 +932,11 @@ def parse_parts_from_points(
     part_group_noise_attach_radius = float(part_group_cfg.get("noise_attach_radius", 0.045))
     part_group_min_keep_ratio = float(part_group_cfg.get("min_keep_ratio", 0.50))
     part_group_secondary_center_radius = float(part_group_cfg.get("secondary_center_radius", 0.10))
+    part_group_distal_min_keep_ratio = float(part_group_cfg.get("distal_min_keep_ratio", 0.35))
+    part_group_distal_secondary_center_radius = float(part_group_cfg.get("distal_secondary_center_radius", 0.06))
+    part_group_distal_noise_attach_radius = float(part_group_cfg.get("distal_noise_attach_radius", 0.025))
+    part_group_distal_fallback_to_input = bool(part_group_cfg.get("distal_fallback_to_input", False))
+    part_group_distal_max_anchor_quantile = float(part_group_cfg.get("distal_max_anchor_quantile", 0.90))
     hierarchy_cfg = parser_cfg.get("hierarchy", {}) if isinstance(parser_cfg.get("hierarchy"), Mapping) else {}
     head_arm_guard_cfg = (
         hierarchy_cfg.get("head_arm_guard", {})
@@ -1161,18 +1236,20 @@ def parse_parts_from_points(
             left_lower_anchor,
             eps=part_group_eps,
             min_points=part_group_min_points,
-            noise_attach_radius=part_group_noise_attach_radius,
-            min_keep_ratio=part_group_min_keep_ratio,
-            secondary_center_radius=part_group_secondary_center_radius,
+            noise_attach_radius=part_group_distal_noise_attach_radius,
+            min_keep_ratio=part_group_distal_min_keep_ratio,
+            secondary_center_radius=part_group_distal_secondary_center_radius,
+            fallback_to_input=part_group_distal_fallback_to_input,
         )
         right_lower = _filter_part_component_by_anchor(
             right_lower,
             right_lower_anchor,
             eps=part_group_eps,
             min_points=part_group_min_points,
-            noise_attach_radius=part_group_noise_attach_radius,
-            min_keep_ratio=part_group_min_keep_ratio,
-            secondary_center_radius=part_group_secondary_center_radius,
+            noise_attach_radius=part_group_distal_noise_attach_radius,
+            min_keep_ratio=part_group_distal_min_keep_ratio,
+            secondary_center_radius=part_group_distal_secondary_center_radius,
+            fallback_to_input=part_group_distal_fallback_to_input,
         )
         left_shin = _filter_part_component_by_anchor(
             left_shin,
@@ -1191,6 +1268,20 @@ def parse_parts_from_points(
             noise_attach_radius=part_group_noise_attach_radius,
             min_keep_ratio=part_group_min_keep_ratio,
             secondary_center_radius=part_group_secondary_center_radius,
+        )
+        left_lower = _trim_far_points_from_anchor(
+            left_lower,
+            left_lower_anchor,
+            max_anchor_quantile=part_group_distal_max_anchor_quantile,
+            min_keep_ratio=part_group_distal_min_keep_ratio,
+            min_points=part_group_min_points,
+        )
+        right_lower = _trim_far_points_from_anchor(
+            right_lower,
+            right_lower_anchor,
+            max_anchor_quantile=part_group_distal_max_anchor_quantile,
+            min_keep_ratio=part_group_distal_min_keep_ratio,
+            min_points=part_group_min_points,
         )
 
     arm_points = (
@@ -1246,6 +1337,7 @@ def parse_parts_from_points(
                 obb_corners_xyz=box.obb_corners_xyz + center_delta[None, :],
             )
         boxes[name] = box
+    continuity_boxes = dict(boxes)
 
     if box_post_enabled:
         boxes = _enforce_box_hierarchy(
@@ -1256,7 +1348,9 @@ def parse_parts_from_points(
 
     part_centers: Dict[str, np.ndarray] = {}
     for name in DEFAULT_PART_ORDER:
-        box = boxes[name]
+        box = continuity_boxes.get(name, boxes[name])
+        if not box.valid:
+            box = boxes[name]
         if box.valid:
             part_centers[name] = box.center_xyz
 
@@ -1288,6 +1382,11 @@ def parse_parts_from_points(
         "torso_limb_extra_points": int(np.count_nonzero(torso_limb_extra_mask)),
         "head_arm_guard_enabled": head_arm_guard_enabled,
         "part_grouping_enabled": part_group_enabled,
+        "part_group_distal_min_keep_ratio": float(part_group_distal_min_keep_ratio),
+        "part_group_distal_secondary_center_radius": float(part_group_distal_secondary_center_radius),
+        "part_group_distal_noise_attach_radius": float(part_group_distal_noise_attach_radius),
+        "part_group_distal_fallback_to_input": bool(part_group_distal_fallback_to_input),
+        "part_group_distal_max_anchor_quantile": float(part_group_distal_max_anchor_quantile),
     }
     next_state = {"part_centers": {k: [float(c) for c in v.tolist()] for k, v in part_centers.items()}}
     return boxes, info, part_points, next_state

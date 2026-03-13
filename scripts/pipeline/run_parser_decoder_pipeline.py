@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import glob
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,8 +20,18 @@ python -m scripts run-parser-pipeline \
   --extract-bg data/real/SQUAT/raw/SQUAT_bg.pcd \
   --output-dir outputs/SQUAT/parser_label \
   --viz-dir outputs/SQUAT/parser_viz \
-  --viz-write-lines
+  --viz-write-lines \
+  --build-playback \
+  --playback-output outputs/SQUAT/parser_playback.npz \
+  --no-playback-open-windows \
+&& WAYLAND_DISPLAY= DISPLAY=:0 XDG_SESSION_TYPE=x11 \
+python -m scripts play-parser-playback \
+  --input outputs/SQUAT/parser_playback.npz \
+  --fps 2 \
+  --loop \
+  --log-every 30
 
+  --viz-write-lines
   --gt-jsonl data/feature/SQUAT_label_GT.jsonl
 """
 
@@ -36,6 +48,70 @@ def run_step(cmd: List[str], dry_run: bool) -> None:
     if dry_run:
         return
     subprocess.run(cmd, check=True)
+
+
+def _is_wsl() -> bool:
+    if os.environ.get("WSL_INTEROP") or os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    version_path = Path("/proc/version")
+    if version_path.exists():
+        text = version_path.read_text(encoding="utf-8", errors="ignore").lower()
+        if "microsoft" in text:
+            return True
+    return False
+
+
+def _wsl_to_windows_path(path: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", str(path.resolve())],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    out = result.stdout.strip()
+    return out or None
+
+
+def _powershell_quote(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _build_windows_playback_launch_cmd(
+    *,
+    root: Path,
+    playback_npz: Path,
+    windows_python_cmd: str,
+    fps: float,
+    loop: bool,
+) -> List[str] | None:
+    if shutil.which("powershell.exe") is None:
+        return None
+    root_win = _wsl_to_windows_path(root)
+    playback_win = _wsl_to_windows_path(playback_npz)
+    if not root_win or not playback_win:
+        return None
+
+    play_cmd = (
+        f"{windows_python_cmd} -m scripts play-parser-playback "
+        f"--input {_powershell_quote(playback_win)} --fps {float(fps):.6f}"
+    )
+    if loop:
+        play_cmd += " --loop"
+    ps_script = (
+        f"Set-Location -LiteralPath {_powershell_quote(root_win)}; "
+        f"{play_cmd}"
+    )
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        ps_script,
+    ]
 
 
 def _has_glob_chars(text: str) -> bool:
@@ -149,8 +225,78 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--head-rules", type=str, default="configs/feature/label_rules.json")
     parser.add_argument("--gt-jsonl", type=str, default=None)
     parser.add_argument("--gt-frame-offset", type=str, default="auto", choices=["auto", "0", "1"])
+    parser.add_argument(
+        "--sequence-mode",
+        type=str,
+        default="parent",
+        choices=["auto", "single", "parent", "prefix", "regex"],
+        help="How to split parser stream into temporal sequences. Default assumes one continuous sequence per parent dir.",
+    )
+    parser.add_argument("--sequence-regex", type=str, default=None, help="Regex for --sequence-mode regex.")
+    parser.add_argument(
+        "--sequence-gap-reset",
+        type=int,
+        default=1,
+        help="Reset temporal state on numeric suffix discontinuity (>N). Default=1 for continuous time-series inputs.",
+    )
+    parser.add_argument("--track-max-missed", type=int, default=3)
+    parser.add_argument("--track-velocity-alpha", type=float, default=0.45)
+    parser.add_argument("--track-parts", dest="track_parts", action="store_true", help="Enable semantic part tracker.")
+    parser.add_argument("--no-track-parts", dest="track_parts", action="store_false", help="Disable semantic part tracker.")
     parser.add_argument("--viz-dir", type=str, default=None, help="Optional visualization output directory.")
     parser.add_argument("--viz-write-lines", action="store_true", help="Write part box line-set PLY in visualization output.")
+    parser.add_argument(
+        "--build-playback",
+        action="store_true",
+        help="After parser run, build compressed playback NPZ from viz PLY sequence.",
+    )
+    parser.add_argument(
+        "--playback-output",
+        type=str,
+        default="outputs/parser_playback/parser_playback.npz",
+        help="Output NPZ path used when --build-playback is enabled.",
+    )
+    parser.add_argument(
+        "--playback-no-lines",
+        action="store_true",
+        help="Exclude *_part_boxes_lineset.ply when building playback NPZ.",
+    )
+    parser.add_argument(
+        "--playback-open-windows",
+        dest="playback_open_windows",
+        action="store_true",
+        help="After --build-playback, launch Windows GUI playback via powershell.exe.",
+    )
+    parser.add_argument(
+        "--no-playback-open-windows",
+        dest="playback_open_windows",
+        action="store_false",
+        help="Disable auto launch of Windows GUI playback.",
+    )
+    parser.add_argument(
+        "--windows-python-cmd",
+        type=str,
+        default="py -3.11",
+        help="Windows-side python launcher command used by --playback-open-windows.",
+    )
+    parser.add_argument(
+        "--playback-open-fps",
+        type=float,
+        default=10.0,
+        help="FPS used when auto-launching Windows playback.",
+    )
+    parser.add_argument(
+        "--playback-open-loop",
+        dest="playback_open_loop",
+        action="store_true",
+        help="Use --loop for auto-launched Windows playback.",
+    )
+    parser.add_argument(
+        "--no-playback-open-loop",
+        dest="playback_open_loop",
+        action="store_false",
+        help="Disable --loop in auto-launched Windows playback.",
+    )
     parser.add_argument(
         "--extract-person",
         action="store_true",
@@ -181,6 +327,9 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--python", type=str, default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
     parser.set_defaults(extract_bg_icp=True)
+    parser.set_defaults(track_parts=True)
+    parser.set_defaults(playback_open_windows=True)
+    parser.set_defaults(playback_open_loop=True)
     return parser.parse_args(argv)
 
 
@@ -286,7 +435,21 @@ def main(argv: List[str] | None = None) -> None:
         str(resolve_repo_path(root, args.head_rules)),
         "--gt-frame-offset",
         args.gt_frame_offset,
+        "--sequence-mode",
+        args.sequence_mode,
+        "--sequence-gap-reset",
+        str(int(args.sequence_gap_reset)),
+        "--track-max-missed",
+        str(int(args.track_max_missed)),
+        "--track-velocity-alpha",
+        str(float(args.track_velocity_alpha)),
     ]
+    if args.sequence_regex:
+        cmd.extend(["--sequence-regex", args.sequence_regex])
+    if args.track_parts:
+        cmd.append("--track-parts")
+    else:
+        cmd.append("--no-track-parts")
     if args.viz_dir:
         cmd.extend(["--viz-dir", str(resolve_repo_path(root, args.viz_dir))])
     if args.viz_write_lines:
@@ -296,6 +459,38 @@ def main(argv: List[str] | None = None) -> None:
 
     print(f"[parser-pipeline] root={root}")
     run_step(cmd, dry_run=bool(args.dry_run))
+    if args.build_playback:
+        if not args.viz_dir:
+            raise ValueError("--build-playback requires --viz-dir (source of *_parts_colored.ply).")
+        playback_output = resolve_repo_path(root, args.playback_output)
+        playback_cmd = [
+            args.python,
+            "-m",
+            "scripts",
+            "build-parser-playback",
+            "--input-dir",
+            str(resolve_repo_path(root, args.viz_dir)),
+            "--output",
+            str(playback_output),
+        ]
+        if args.playback_no_lines:
+            playback_cmd.append("--no-lines")
+        run_step(playback_cmd, dry_run=bool(args.dry_run))
+        if args.playback_open_windows:
+            if not _is_wsl():
+                print("[parser-pipeline] skip Windows playback launch: not running in WSL.")
+            else:
+                launch_cmd = _build_windows_playback_launch_cmd(
+                    root=root,
+                    playback_npz=playback_output,
+                    windows_python_cmd=str(args.windows_python_cmd),
+                    fps=float(args.playback_open_fps),
+                    loop=bool(args.playback_open_loop),
+                )
+                if launch_cmd is None:
+                    print("[parser-pipeline] skip Windows playback launch: powershell/wslpath unavailable.")
+                else:
+                    run_step(launch_cmd, dry_run=bool(args.dry_run))
     print("[parser-pipeline] done")
 
 

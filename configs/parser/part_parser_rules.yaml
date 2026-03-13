@@ -79,6 +79,11 @@ parser:
     noise_attach_radius: 0.045
     min_keep_ratio: 0.50
     secondary_center_radius: 0.10
+    distal_min_keep_ratio: 0.35
+    distal_secondary_center_radius: 0.06
+    distal_noise_attach_radius: 0.025
+    distal_fallback_to_input: true
+    distal_max_anchor_quantile: 0.90
   hierarchy:
     head_arm_guard:
       enabled: true
@@ -91,7 +96,7 @@ parser:
     allow_small_parts: true
     small_part_min_size: 0.025
     robust_quantile: 0.05
-    contact_margin: 0.003
+    contact_margin: 0.0
     forbidden_margin: 0.003
   continuity:
     enabled: true
