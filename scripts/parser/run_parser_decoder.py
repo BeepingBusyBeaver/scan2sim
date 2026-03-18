@@ -16,6 +16,7 @@ from scripts.common.json_utils import write_json
 from scripts.common.path_utils import natural_key_path
 from scripts.common.pc_io import read_point_cloud_any
 from scripts.feature.heads import load_head_specs
+from scripts.parser.attention_refiner import refine_parts_with_attention
 from scripts.parser.body_frame import BodyFrame, estimate_body_frame
 from scripts.parser.label_decoder import decode_labels, load_decoder_config
 from scripts.parser.part_parser import DEFAULT_PART_ORDER, load_part_parser_config, parse_parts_from_points
@@ -477,6 +478,11 @@ def _assign_colors_from_part_points(
     color_default = np.array([0.60, 0.60, 0.60], dtype=np.float64)
     colors = np.tile(color_default[None, :], (points_body.shape[0], 1))
     fallback_max_distance = 0.08
+    gray_fill_radius = 0.09
+    gray_fill_min_neighbors = 4
+    gray_fill_majority = 0.80
+    gray_fill_max_k = 12
+    assigned_names: List[str | None] = [None for _ in range(points_body.shape[0])]
 
     lookup: Dict[Tuple[float, float, float], List[int]] = {}
     for idx, row in enumerate(points_body):
@@ -517,6 +523,7 @@ def _assign_colors_from_part_points(
                     best_name = name
             picked = best_name
         colors[idx] = np.array(PART_COLORS.get(picked, (0.95, 0.95, 0.95)), dtype=np.float64)
+        assigned_names[idx] = picked
 
     fallback_boxes: List[Tuple[str, np.ndarray, np.ndarray, np.ndarray]] = []
     for name in DEFAULT_PART_ORDER:
@@ -529,12 +536,29 @@ def _assign_colors_from_part_points(
         fallback_boxes.append((name, min_xyz, max_xyz, center_xyz))
 
     if fallback_boxes:
-        for idx, names in enumerate(candidate_parts):
-            if names:
+        for idx, part_name in enumerate(assigned_names):
+            if part_name is not None:
                 continue
             point = points_body[idx]
             best_name: str | None = None
             best_score = np.inf
+
+            inside_names: List[str] = []
+            for name, min_xyz, max_xyz, _ in fallback_boxes:
+                if np.all((point >= (min_xyz - 1e-9)) & (point <= (max_xyz + 1e-9))):
+                    inside_names.append(name)
+            if len(inside_names) == 1:
+                best_name = inside_names[0]
+            elif len(inside_names) > 1:
+                best_dist_inside = np.inf
+                for name, _, _, center_xyz in fallback_boxes:
+                    if name not in inside_names:
+                        continue
+                    dist_inside = float(np.linalg.norm(point - center_xyz))
+                    if dist_inside < best_dist_inside:
+                        best_dist_inside = dist_inside
+                        best_name = name
+
             for name, min_xyz, max_xyz, center_xyz in fallback_boxes:
                 outside = np.maximum(np.maximum(min_xyz - point, point - max_xyz), 0.0)
                 dist_out = float(np.linalg.norm(outside))
@@ -548,6 +572,37 @@ def _assign_colors_from_part_points(
                     best_name = name
             if best_name is not None:
                 colors[idx] = np.array(PART_COLORS.get(best_name, (0.95, 0.95, 0.95)), dtype=np.float64)
+                assigned_names[idx] = best_name
+
+    unresolved = [idx for idx, name in enumerate(assigned_names) if name is None]
+    resolved = [idx for idx, name in enumerate(assigned_names) if name is not None]
+    if unresolved and resolved:
+        resolved_points = points_body[resolved]
+        resolved_names = [assigned_names[idx] for idx in resolved]
+        for idx in unresolved:
+            point = points_body[idx]
+            dists = np.linalg.norm(resolved_points - point[None, :], axis=1)
+            k = min(int(gray_fill_max_k), dists.shape[0])
+            if k <= 0:
+                continue
+            near = np.argpartition(dists, k - 1)[:k]
+            near = near[dists[near] <= float(gray_fill_radius)]
+            if near.size < int(gray_fill_min_neighbors):
+                continue
+            votes: Dict[str, int] = {}
+            for local_idx in near.tolist():
+                voted = resolved_names[int(local_idx)]
+                if voted is None:
+                    continue
+                votes[voted] = int(votes.get(voted, 0) + 1)
+            if not votes:
+                continue
+            winner = max(votes.items(), key=lambda item: item[1])
+            ratio = float(winner[1]) / float(max(int(near.size), 1))
+            if ratio < float(gray_fill_majority):
+                continue
+            colors[idx] = np.array(PART_COLORS.get(winner[0], (0.95, 0.95, 0.95)), dtype=np.float64)
+            assigned_names[idx] = winner[0]
     return colors
 
 
@@ -665,7 +720,7 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--part-config",
         type=str,
-        default="configs/parser/part_parser_rules.yaml",
+        default="configs/parser/part_parser_rules_v1.yaml",
         help="Part parser rules YAML.",
     )
     parser.add_argument(
@@ -859,6 +914,25 @@ def main(argv: List[str] | None = None) -> None:
             part_cfg,
             prev_state=parser_state,
         )
+        parser_cfg = part_cfg.get("parser", {}) if isinstance(part_cfg, Mapping) else {}
+        if not isinstance(parser_cfg, Mapping):
+            parser_cfg = {}
+        refiner_cfg = part_cfg.get("refiner", {}) if isinstance(part_cfg, Mapping) else {}
+        if not isinstance(refiner_cfg, Mapping):
+            refiner_cfg = {}
+        parts_refined, part_points_refined, refiner_meta = refine_parts_with_attention(
+            points_body=points_body,
+            parts=parts,
+            part_points=parsed_part_points,
+            config=refiner_cfg,
+            parser_cfg=parser_cfg,
+        )
+        if bool(refiner_meta.get("applied", False)):
+            parts = parts_refined
+            parsed_part_points = part_points_refined
+        if isinstance(parse_meta, dict):
+            parse_meta["refiner"] = refiner_meta
+
         relation_obj, relation_state = compute_relation_features(
             parts,
             decoder_cfg,
@@ -929,6 +1003,7 @@ def main(argv: List[str] | None = None) -> None:
                         and decoder_cfg.get("temporal", {}).get("enabled", False)
                     ),
                     "stage_h_part_id_tracker": bool(args.track_parts),
+                    "stage_i_attention_refiner": bool(refiner_meta.get("enabled", False)),
                 },
                 "sequence": {
                     "mode": args.sequence_mode,

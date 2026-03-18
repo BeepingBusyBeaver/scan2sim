@@ -63,6 +63,104 @@ def _parse_axes_world(value: Any) -> np.ndarray | None:
     return None
 
 
+def _apply_horizontal_hint(
+    x_axis: np.ndarray,
+    y_axis: np.ndarray,
+    z_axis: np.ndarray,
+    config: Mapping[str, Any] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, Dict[str, Any]]:
+    hint_raw = None
+    mode = "align"
+    allow_xz_swap = True
+    min_alignment = 0.0
+    if isinstance(config, Mapping):
+        hint_raw = config.get("horizontal_hint")
+        mode_raw = config.get("horizontal_mode")
+        if isinstance(mode_raw, str) and mode_raw.strip():
+            mode = mode_raw.strip().lower()
+        allow_xz_swap = bool(config.get("horizontal_allow_xz_swap", True))
+        min_alignment = float(np.clip(float(config.get("horizontal_min_alignment", 0.0)), 0.0, 1.0))
+    if hint_raw is None:
+        return x_axis, y_axis, z_axis, {"enabled": False}
+
+    hint_vec = _parse_vector3(hint_raw, np.zeros((3,), dtype=np.float64))
+    hint_vec = _normalize(hint_vec)
+    if float(np.linalg.norm(hint_vec)) <= 1e-9:
+        return x_axis, y_axis, z_axis, {"enabled": True, "applied": False, "reason": "invalid_hint"}
+
+    hint_proj = hint_vec - y_axis * float(np.dot(hint_vec, y_axis))
+    hint_proj = _normalize(hint_proj)
+    if float(np.linalg.norm(hint_proj)) <= 1e-9:
+        return x_axis, y_axis, z_axis, {"enabled": True, "applied": False, "reason": "parallel_to_up"}
+
+    if mode in {"lock", "fixed", "strict"}:
+        x_axis = hint_proj
+        z_axis = _normalize(np.cross(x_axis, y_axis))
+        if float(np.linalg.norm(z_axis)) <= 1e-9:
+            return x_axis, y_axis, z_axis, {"enabled": True, "applied": False, "reason": "lock_cross_failed"}
+        x_axis = _normalize(np.cross(y_axis, z_axis))
+        z_axis = _normalize(np.cross(x_axis, y_axis))
+        info = {
+            "enabled": True,
+            "applied": True,
+            "mode": "lock",
+            "hint": [float(v) for v in hint_vec.tolist()],
+            "hint_projected": [float(v) for v in hint_proj.tolist()],
+            "swapped_xz": False,
+            "flipped_sign": False,
+            "final_alignment": float(np.dot(x_axis, hint_proj)),
+        }
+        return x_axis, y_axis, z_axis, info
+
+    score_x = abs(float(np.dot(x_axis, hint_proj)))
+    score_z = abs(float(np.dot(z_axis, hint_proj)))
+    swapped = False
+    if allow_xz_swap and (score_z > score_x):
+        x_axis, z_axis = z_axis, -x_axis
+        swapped = True
+
+    flipped = False
+    if float(np.dot(x_axis, hint_proj)) < 0.0:
+        x_axis = -x_axis
+        z_axis = -z_axis
+        flipped = True
+
+    x_axis = _normalize(x_axis)
+    z_axis = _normalize(np.cross(x_axis, y_axis))
+    if float(np.linalg.norm(z_axis)) <= 1e-9:
+        z_axis = _normalize(z_axis)
+    x_axis = _normalize(np.cross(y_axis, z_axis))
+    z_axis = _normalize(np.cross(x_axis, y_axis))
+    final_alignment = float(np.dot(x_axis, hint_proj))
+    if abs(final_alignment) < min_alignment:
+        return x_axis, y_axis, z_axis, {
+            "enabled": True,
+            "applied": False,
+            "mode": "align",
+            "reason": "below_min_alignment",
+            "min_alignment": float(min_alignment),
+            "final_alignment": float(final_alignment),
+            "score_x_before": float(score_x),
+            "score_z_before": float(score_z),
+            "swapped_xz": bool(swapped),
+            "flipped_sign": bool(flipped),
+        }
+    info = {
+        "enabled": True,
+        "applied": True,
+        "mode": "align",
+        "hint": [float(v) for v in hint_vec.tolist()],
+        "hint_projected": [float(v) for v in hint_proj.tolist()],
+        "score_x_before": float(score_x),
+        "score_z_before": float(score_z),
+        "swapped_xz": bool(swapped),
+        "flipped_sign": bool(flipped),
+        "allow_xz_swap": bool(allow_xz_swap),
+        "final_alignment": float(final_alignment),
+    }
+    return x_axis, y_axis, z_axis, info
+
+
 def _orthogonality_error(axes: np.ndarray) -> float:
     gram = axes.T @ axes
     return float(np.max(np.abs(gram - np.eye(3, dtype=np.float64))))
@@ -215,6 +313,13 @@ def estimate_body_frame(points_world: np.ndarray, config: Mapping[str, Any] | No
     x_axis = _normalize(np.cross(y_axis, z_axis))
     z_axis = _normalize(np.cross(x_axis, y_axis))
 
+    x_axis, y_axis, z_axis, horizontal_hint_info = _apply_horizontal_hint(
+        x_axis,
+        y_axis,
+        z_axis,
+        config,
+    )
+
     continuity_axis_flips = {"x": False, "y": False, "z": False}
     if continuity_enabled and prev_axes_world is not None and prev_axes_world.shape == (3, 3):
         prev_x = _normalize(prev_axes_world[:, 0])
@@ -272,5 +377,6 @@ def estimate_body_frame(points_world: np.ndarray, config: Mapping[str, Any] | No
         "continuity_enabled": bool(continuity_enabled),
         "continuity_prev_provided": bool(prev_axes_world is not None),
         "continuity_axis_flips": continuity_axis_flips,
+        "horizontal_hint_info": horizontal_hint_info,
     }
     return frame, info

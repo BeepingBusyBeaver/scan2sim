@@ -163,7 +163,7 @@ python -m scripts run-parser-decoder \
   --input data/real/SQUAT/human \
   --input-pattern "human_*.ply" \
   --profile squat \
-  --part-config configs/parser/part_parser_rules.yaml \
+  --part-config configs/parser/part_parser_rules_v1.yaml \
   --decoder-config configs/parser/label_decoder_rules.yaml \
   --head-rules configs/feature/label_rules.json \
   --output-dir outputs/SQUAT/parser_label

@@ -17,6 +17,10 @@ preprocess:
 body_frame:
   world_up_mode: fixed
   world_up: [0.0, 0.0, 1.0]
+  horizontal_hint: [1.0, 0.0, 0.0]
+  horizontal_mode: lock
+  horizontal_allow_xz_swap: false
+  horizontal_min_alignment: 0.90
   auto_up:
     span_quantiles: [0.05, 0.95]
     align_weight: 0.10
@@ -25,7 +29,7 @@ body_frame:
       - [0.0, 1.0, 0.0]
       - [0.0, 0.0, 1.0]
   continuity:
-    enabled: true
+    enabled: false
 
 parser:
   left_is_positive_x: true
@@ -43,7 +47,7 @@ parser:
       x_scale: 1.55
       z_scale: 1.30
   torso_arm_salvage:
-    enabled: true
+    enabled: false
     y_margin: 0.03
     edge_percentile: 0.72
     min_lateral: 0.055
@@ -199,7 +203,7 @@ parser:
           parent: right_thigh
           min_overlap: 0.005
   continuity:
-    enabled: true
+    enabled: false
     blend_with_prev: 0.15
 
 refiner:

@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 from scripts.common.io_paths import resolve_repo_path
 
@@ -16,20 +18,45 @@ from scripts.common.io_paths import resolve_repo_path
 """
 python -m scripts run-parser-pipeline \
   --extract-person \
-  --input "data/real/SQUAT/raw/*.pcd" \
-  --extract-bg data/real/SQUAT/raw/SQUAT_bg.pcd \
-  --output-dir outputs/SQUAT/parser_label \
-  --viz-dir outputs/SQUAT/parser_viz \
+  --input "data/real/RMmotion/raw/*.pcd" \
+  --extract-bg data/real/RMmotion/raw/RMmotion_bg.pcd \
+  --output-dir outputs/RMmotion/parser_label \
+  --viz-dir outputs/RMmotion/parser_viz \
   --viz-write-lines \
   --build-playback \
-  --playback-output outputs/SQUAT/parser_playback.npz \
+  --playback-output outputs/RMmotion/parser_playback.npz \
   --no-playback-open-windows \
 && WAYLAND_DISPLAY= DISPLAY=:0 XDG_SESSION_TYPE=x11 \
 python -m scripts play-parser-playback \
-  --input outputs/SQUAT/parser_playback.npz \
+  --input outputs/RMmotion/parser_playback.npz \
   --fps 2 \
   --loop \
   --log-every 30
+
+hm      1 6 10 14 17 21 24 27 31 1
+frame   0 5 9 13 16 20 23 26 30 0
+
+
+python -m scripts run-parser-pipeline \
+  --input "data/virtual/pdbr_25421_lidar/*.ply" \
+  --input-pattern "*.ply" \
+  --part-config configs/parser/part_parser_rules_v1.yaml \
+  --output-dir outputs/virtual_pdbr/parser_label \
+  --viz-dir outputs/virtual_pdbr/parser_viz \
+  --viz-write-lines \
+  --sequence-mode regex \
+  --sequence-regex "[^/]+\\.ply$" \
+  --no-track-parts \
+  --build-playback \
+  --playback-output outputs/virtual_pdbr/parser_playback.npz \
+  --no-playback-open-windows \
+&& WAYLAND_DISPLAY= DISPLAY=:0 XDG_SESSION_TYPE=x11 \
+python -m scripts play-parser-playback \
+  --input outputs/virtual_pdbr/parser_playback.npz \
+  --fps 2 \
+  --loop \
+  --log-every 30
+
 
   --viz-write-lines
   --gt-jsonl data/feature/SQUAT_label_GT.jsonl
@@ -48,6 +75,232 @@ def run_step(cmd: List[str], dry_run: bool) -> None:
     if dry_run:
         return
     subprocess.run(cmd, check=True)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _mean(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values) / len(values))
+
+
+def _median(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return float(ordered[mid])
+    return float(0.5 * (ordered[mid - 1] + ordered[mid]))
+
+
+def _box_volume(part: Dict[str, Any]) -> float:
+    size = part.get("size_xyz")
+    if not isinstance(size, list) or len(size) != 3:
+        return 0.0
+    sx = max(_safe_float(size[0]), 0.0)
+    sy = max(_safe_float(size[1]), 0.0)
+    sz = max(_safe_float(size[2]), 0.0)
+    return float(sx * sy * sz)
+
+
+def _axis_gap(child: Dict[str, Any], parent: Dict[str, Any]) -> float:
+    child_min = child.get("min_xyz")
+    child_max = child.get("max_xyz")
+    parent_min = parent.get("min_xyz")
+    parent_max = parent.get("max_xyz")
+    if not (
+        isinstance(child_min, list)
+        and isinstance(child_max, list)
+        and isinstance(parent_min, list)
+        and isinstance(parent_max, list)
+        and len(child_min) == len(child_max) == len(parent_min) == len(parent_max) == 3
+    ):
+        return 0.0
+    sep = []
+    for axis in range(3):
+        a_min = _safe_float(child_min[axis])
+        a_max = _safe_float(child_max[axis])
+        b_min = _safe_float(parent_min[axis])
+        b_max = _safe_float(parent_max[axis])
+        d1 = max(a_min - b_max, 0.0)
+        d2 = max(b_min - a_max, 0.0)
+        sep.append(max(d1, d2))
+    return float((sep[0] ** 2 + sep[1] ** 2 + sep[2] ** 2) ** 0.5)
+
+
+def _collect_parser_report(output_dir: Path, output_prefix: str, since_ts: float) -> Dict[str, Any]:
+    pattern = f"{output_prefix}*.json"
+    all_files = sorted(path for path in output_dir.glob(pattern) if path.is_file())
+    recent_files = [path for path in all_files if path.stat().st_mtime >= (since_ts - 0.2)]
+    files = recent_files if recent_files else all_files
+
+    stage_b_ortho: List[float] = []
+    stage_b_up: List[float] = []
+    stage_b_flip_frames = 0
+
+    stage_c_valid_parts: List[float] = []
+    stage_c_critical_miss = 0
+    stage_c_left_right_arm_gap: List[float] = []
+    stage_c_left_right_leg_gap: List[float] = []
+
+    stage_d_parent_gap: List[float] = []
+    stage_d_limb_torso_ratio: List[float] = []
+
+    ref_enabled = 0
+    ref_applied = 0
+    ref_reverted_parts: List[float] = []
+    ref_reason_counts: Dict[str, int] = {}
+    ref_score_delta: List[float] = []
+
+    parent_links = [
+        ("left_lower_arm", "left_upper_arm"),
+        ("right_lower_arm", "right_upper_arm"),
+        ("left_upper_arm", "torso"),
+        ("right_upper_arm", "torso"),
+        ("left_shin", "left_thigh"),
+        ("right_shin", "right_thigh"),
+        ("left_thigh", "torso"),
+        ("right_thigh", "torso"),
+        ("head", "torso"),
+    ]
+    critical_parts = ["torso", "left_upper_arm", "right_upper_arm", "left_thigh", "right_thigh"]
+    limb_parts = ["left_upper_arm", "left_lower_arm", "right_upper_arm", "right_lower_arm", "left_thigh", "left_shin", "right_thigh", "right_shin"]
+
+    for path in files:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            continue
+
+        body_frame = payload.get("body_frame", {})
+        estimation_meta = body_frame.get("estimation_meta", {}) if isinstance(body_frame, dict) else {}
+        stage_b_ortho.append(abs(_safe_float(estimation_meta.get("orthogonality_error"), 0.0)))
+        stage_b_up.append(abs(_safe_float(estimation_meta.get("up_alignment_cosine"), 0.0)))
+        flips = estimation_meta.get("continuity_axis_flips", {})
+        if isinstance(flips, dict) and any(bool(flips.get(k, False)) for k in ("x", "y", "z")):
+            stage_b_flip_frames += 1
+
+        parts = payload.get("parts_body", {})
+        if not isinstance(parts, dict):
+            parts = {}
+        valid_parts = [name for name, part in parts.items() if isinstance(part, dict) and bool(part.get("valid", False))]
+        stage_c_valid_parts.append(float(len(valid_parts)))
+        if any(not bool(parts.get(name, {}).get("valid", False)) for name in critical_parts):
+            stage_c_critical_miss += 1
+
+        left_arm = _safe_float(parts.get("left_upper_arm", {}).get("num_points"), 0.0) + _safe_float(parts.get("left_lower_arm", {}).get("num_points"), 0.0)
+        right_arm = _safe_float(parts.get("right_upper_arm", {}).get("num_points"), 0.0) + _safe_float(parts.get("right_lower_arm", {}).get("num_points"), 0.0)
+        left_leg = _safe_float(parts.get("left_thigh", {}).get("num_points"), 0.0) + _safe_float(parts.get("left_shin", {}).get("num_points"), 0.0)
+        right_leg = _safe_float(parts.get("right_thigh", {}).get("num_points"), 0.0) + _safe_float(parts.get("right_shin", {}).get("num_points"), 0.0)
+        stage_c_left_right_arm_gap.append(abs(left_arm - right_arm))
+        stage_c_left_right_leg_gap.append(abs(left_leg - right_leg))
+
+        for child_name, parent_name in parent_links:
+            child = parts.get(child_name)
+            parent = parts.get(parent_name)
+            if not isinstance(child, dict) or not isinstance(parent, dict):
+                continue
+            if not bool(child.get("valid", False)) or not bool(parent.get("valid", False)):
+                continue
+            stage_d_parent_gap.append(_axis_gap(child, parent))
+
+        torso = parts.get("torso", {})
+        torso_vol = _box_volume(torso if isinstance(torso, dict) else {})
+        if torso_vol > 1e-9:
+            for limb_name in limb_parts:
+                part = parts.get(limb_name)
+                if not isinstance(part, dict) or (not bool(part.get("valid", False))):
+                    continue
+                stage_d_limb_torso_ratio.append(_box_volume(part) / torso_vol)
+
+        parse_meta = payload.get("parse_meta", {})
+        refiner = parse_meta.get("refiner", {}) if isinstance(parse_meta, dict) else {}
+        if isinstance(refiner, dict):
+            if bool(refiner.get("enabled", False)):
+                ref_enabled += 1
+            if bool(refiner.get("applied", False)):
+                ref_applied += 1
+            if "guard_reverted_parts" in refiner:
+                ref_reverted_parts.append(_safe_float(refiner.get("guard_reverted_parts"), 0.0))
+            if "score_before" in refiner and "score_after" in refiner:
+                ref_score_delta.append(_safe_float(refiner.get("score_after")) - _safe_float(refiner.get("score_before")))
+            reason = refiner.get("reason")
+            if isinstance(reason, str) and reason:
+                ref_reason_counts[reason] = int(ref_reason_counts.get(reason, 0) + 1)
+
+    return {
+        "files_total": int(len(all_files)),
+        "files_recent": int(len(recent_files)),
+        "files_used": int(len(files)),
+        "stage_b_ortho_mean": _mean(stage_b_ortho),
+        "stage_b_up_mean": _mean(stage_b_up),
+        "stage_b_flip_frames": int(stage_b_flip_frames),
+        "stage_c_valid_parts_mean": _mean(stage_c_valid_parts),
+        "stage_c_valid_parts_min": int(min(stage_c_valid_parts)) if stage_c_valid_parts else 0,
+        "stage_c_critical_miss": int(stage_c_critical_miss),
+        "stage_c_arm_gap_median": _median(stage_c_left_right_arm_gap),
+        "stage_c_leg_gap_median": _median(stage_c_left_right_leg_gap),
+        "stage_d_parent_gap_mean": _mean(stage_d_parent_gap),
+        "stage_d_parent_gap_p95": float(sorted(stage_d_parent_gap)[max(0, int(0.95 * (len(stage_d_parent_gap) - 1)))] if stage_d_parent_gap else 0.0),
+        "stage_d_limb_torso_ratio_p95": float(sorted(stage_d_limb_torso_ratio)[max(0, int(0.95 * (len(stage_d_limb_torso_ratio) - 1)))] if stage_d_limb_torso_ratio else 0.0),
+        "ref_enabled_frames": int(ref_enabled),
+        "ref_applied_frames": int(ref_applied),
+        "ref_reverted_parts_mean": _mean(ref_reverted_parts),
+        "ref_score_delta_mean": _mean(ref_score_delta),
+        "ref_reason_counts": ref_reason_counts,
+    }
+
+
+def _print_parser_report(report: Dict[str, Any]) -> None:
+    used = int(report.get("files_used", 0))
+    total = int(report.get("files_total", 0))
+    recent = int(report.get("files_recent", 0))
+    print(
+        f"[parser-pipeline][report] files_used={used} "
+        f"(recent={recent}, total_in_dir={total})"
+    )
+    if used <= 0:
+        print("[parser-pipeline][report] no parser json files found for report.")
+        return
+    print(
+        "[parser-pipeline][report][B] "
+        f"up_align_mean={_safe_float(report.get('stage_b_up_mean')):.4f} "
+        f"ortho_err_mean={_safe_float(report.get('stage_b_ortho_mean')):.2e} "
+        f"axis_flip_frames={int(report.get('stage_b_flip_frames', 0))}/{used}"
+    )
+    print(
+        "[parser-pipeline][report][C] "
+        f"valid_parts_mean={_safe_float(report.get('stage_c_valid_parts_mean')):.2f} "
+        f"valid_parts_min={int(report.get('stage_c_valid_parts_min', 0))} "
+        f"critical_miss_frames={int(report.get('stage_c_critical_miss', 0))}/{used} "
+        f"arm_gap_median_pts={_safe_float(report.get('stage_c_arm_gap_median')):.1f} "
+        f"leg_gap_median_pts={_safe_float(report.get('stage_c_leg_gap_median')):.1f}"
+    )
+    print(
+        "[parser-pipeline][report][D] "
+        f"parent_gap_mean={_safe_float(report.get('stage_d_parent_gap_mean')):.4f} "
+        f"parent_gap_p95={_safe_float(report.get('stage_d_parent_gap_p95')):.4f} "
+        f"limb_torso_ratio_p95={_safe_float(report.get('stage_d_limb_torso_ratio_p95')):.3f}"
+    )
+    reasons = report.get("ref_reason_counts", {})
+    reason_text = ", ".join(f"{k}:{v}" for k, v in sorted(reasons.items())) if isinstance(reasons, dict) and reasons else "none"
+    print(
+        "[parser-pipeline][report][Refiner] "
+        f"enabled={int(report.get('ref_enabled_frames', 0))}/{used} "
+        f"applied={int(report.get('ref_applied_frames', 0))}/{used} "
+        f"reverted_parts_mean={_safe_float(report.get('ref_reverted_parts_mean')):.2f} "
+        f"score_delta_mean={_safe_float(report.get('ref_score_delta_mean')):.4f} "
+        f"reasons={reason_text}"
+    )
 
 
 def _is_wsl() -> bool:
@@ -324,12 +577,25 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--extract-bg-icp", dest="extract_bg_icp", action="store_true", help="Enable BG ICP in extract-person.")
     parser.add_argument("--no-extract-bg-icp", dest="extract_bg_icp", action="store_false", help="Disable BG ICP in extract-person.")
     parser.add_argument("--extract-no-pcd-transform", action="store_true", help="Disable transform stage in extract-person.")
+    parser.add_argument(
+        "--report-checks",
+        dest="report_checks",
+        action="store_true",
+        help="Print staged parser quality report (B/C/D + refiner) after run-parser-decoder.",
+    )
+    parser.add_argument(
+        "--no-report-checks",
+        dest="report_checks",
+        action="store_false",
+        help="Disable staged parser quality report.",
+    )
     parser.add_argument("--python", type=str, default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
     parser.set_defaults(extract_bg_icp=True)
     parser.set_defaults(track_parts=True)
     parser.set_defaults(playback_open_windows=True)
     parser.set_defaults(playback_open_loop=True)
+    parser.set_defaults(report_checks=True)
     return parser.parse_args(argv)
 
 
@@ -458,7 +724,16 @@ def main(argv: List[str] | None = None) -> None:
         cmd.extend(["--gt-jsonl", str(resolve_repo_path(root, args.gt_jsonl))])
 
     print(f"[parser-pipeline] root={root}")
+    parser_output_dir = resolve_repo_path(root, args.output_dir)
+    run_started_ts = time.time()
     run_step(cmd, dry_run=bool(args.dry_run))
+    if args.report_checks and (not bool(args.dry_run)):
+        report = _collect_parser_report(
+            output_dir=parser_output_dir,
+            output_prefix=str(args.output_prefix),
+            since_ts=run_started_ts,
+        )
+        _print_parser_report(report)
     if args.build_playback:
         if not args.viz_dir:
             raise ValueError("--build-playback requires --viz-dir (source of *_parts_colored.ply).")

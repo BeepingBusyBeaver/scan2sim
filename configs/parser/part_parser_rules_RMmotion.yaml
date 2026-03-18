@@ -1,3 +1,8 @@
+# RMmotion 전용 튜닝
+# 목표
+# 1) head 상부 gray 영역 감소
+# 2) 팔 안쪽 점군이 torso로 흡수되는 현상 완화
+
 preprocess:
   enabled: true
   voxel_size: 0.015
@@ -31,39 +36,39 @@ parser:
   left_is_positive_x: true
   min_points_per_part: 6
   torso:
-    y_range: [0.44, 0.80]
-    x_scale: 1.05
-    z_scale: 1.9
+    y_range: [0.50, 0.79]
+    x_scale: 0.94
+    z_scale: 1.62
     x_percentile: 70.0
     z_percentile: 80.0
     limb_exclusion:
-      enabled: true
-      assign_to_torso: true
+      enabled: false
+      assign_to_torso: false
       y_pad: 0.08
       x_scale: 1.55
       z_scale: 1.30
   torso_arm_salvage:
     enabled: true
     y_margin: 0.03
-    edge_percentile: 0.72
-    min_lateral: 0.055
-    max_ratio: 0.28
+    edge_percentile: 0.70
+    min_lateral: 0.050
+    max_ratio: 0.30
     min_points: 12
     max_shoulder_dist: 0.42
   head:
-    y_range: [0.78, 1.02]
-    x_scale: 1.15
-    z_scale: 1.7
-    center_keep_quantile: 0.55
-    max_radius: 1.0
+    y_range: [0.76, 1.08]
+    x_scale: 1.28
+    z_scale: 1.95
+    center_keep_quantile: 0.80
+    max_radius: 1.25
     top_band_scale: 0.10
-    keep_drop_scale: 0.26
-    core_x_scale: 1.9
-    core_z_scale: 2.1
-    core_min_keep_ratio: 0.40
+    keep_drop_scale: 0.28
+    core_x_scale: 2.0
+    core_z_scale: 2.2
+    core_min_keep_ratio: 0.35
   arm:
-    y_range: [0.36, 0.84]
-    side_min_scale: 0.25
+    y_range: [0.34, 0.86]
+    side_min_scale: 0.16
   leg:
     y_range: [0.00, 0.46]
     side_min_scale: 0.12
@@ -72,8 +77,8 @@ parser:
     hip_quantile: 0.20
     arm_vertical_penalty: 0.90
     leg_vertical_penalty: 0.90
-    min_side_scale: 0.08
-    y_prior_weight: 0.70
+    min_side_scale: 0.05
+    y_prior_weight: 0.62
     top_arm_seed_fraction: 0.12
     bottom_leg_seed_fraction: 0.18
     cluster_eps: 0.085
@@ -85,9 +90,9 @@ parser:
   arm_absence_guard:
     enabled: true
     min_arm_points: 10
-    min_side_ratio: 0.16
-    min_median_y_norm: 0.42
-    max_shoulder_attach_dist: 0.24
+    min_side_ratio: 0.15
+    min_median_y_norm: 0.40
+    max_shoulder_attach_dist: 0.25
     attach_quantile: 0.30
   segment_split:
     arm_prox_quantile: 0.55
@@ -97,6 +102,26 @@ parser:
       prox_quantile: 0.84
       margin: 0.015
       max_move_ratio: 0.35
+  boundary_refine:
+    enabled: true
+    unresolved_max_dist: 0.11
+    head_cap:
+      enabled: true
+      y_margin_low: 0.05
+      x_scale: 1.45
+      z_scale: 2.10
+    torso_arm_reclaim:
+      enabled: true
+      y_margin: 0.04
+      lateral_x_scale: 0.50
+      frontal_z_scale: 0.54
+      max_arm_attach_dist: 0.18
+      arm_vs_torso_margin: 0.001
+    torso_leg_reclaim:
+      enabled: true
+      y_margin: 0.03
+      max_leg_attach_dist: 0.15
+      leg_vs_torso_margin: 0.002
   part_grouping:
     enabled: true
     cluster_eps: 0.070
@@ -105,12 +130,12 @@ parser:
     min_keep_ratio: 0.40
     secondary_center_radius: 0.080
     proximal_min_keep_ratio: 0.38
-    proximal_max_anchor_quantile: 0.86
-    distal_min_keep_ratio: 0.25
-    distal_secondary_center_radius: 0.040
-    distal_noise_attach_radius: 0.015
+    proximal_max_anchor_quantile: 0.92
+    distal_min_keep_ratio: 0.30
+    distal_secondary_center_radius: 0.050
+    distal_noise_attach_radius: 0.020
     distal_fallback_to_input: false
-    distal_max_anchor_quantile: 0.80
+    distal_max_anchor_quantile: 0.88
   hierarchy:
     head_arm_guard:
       enabled: true
@@ -120,26 +145,26 @@ parser:
       radius_scale_z: 1.25
     arm_torso_guard:
       enabled: true
-      y_pad: 0.05
-      x_scale: 1.45
-      z_scale: 1.65
-      shoulder_keep_radius_scale: 0.95
-      shoulder_outward_min: 0.015
-      min_keep_ratio: 0.45
+      y_pad: 0.02
+      x_scale: 1.15
+      z_scale: 1.30
+      shoulder_keep_radius_scale: 1.20
+      shoulder_outward_min: -0.005
+      min_keep_ratio: 0.28
   temporal_box_stabilization:
     enabled: true
-    center_alpha: 0.65
-    size_alpha: 0.55
-    max_center_step_ratio: 0.85
-    max_size_delta_ratio: 0.35
+    center_alpha: 0.68
+    size_alpha: 0.58
+    max_center_step_ratio: 0.80
+    max_size_delta_ratio: 0.30
     min_box_diag: 0.08
   box_postprocess:
     enabled: true
     contact_mode: shift_all
     allow_small_parts: true
     small_part_min_size: 0.025
-    robust_quantile: 0.08
-    contact_margin: 0.0
+    robust_quantile: 0.04
+    contact_margin: 0.007
     forbidden_margin: 0.003
     limb_shape:
       enabled: true
@@ -158,10 +183,10 @@ parser:
         right_thigh: 24.0
         left_shin: 32.0
         right_shin: 32.0
-      quantile: 0.04
+      quantile: 0.05
       min_long_axis: 0.085
       min_aspect_ratio: 1.55
-      max_cross_axis: 0.15
+      max_cross_axis: 0.14
     hard_contact:
       enabled: true
       mode: shift
@@ -203,7 +228,7 @@ parser:
     blend_with_prev: 0.15
 
 refiner:
-  enabled: false  # SQUAT v1 baseline: off by default
+  enabled: false
   iterations: 2
   temperature: 0.55
   in_box_bonus: 0.35
