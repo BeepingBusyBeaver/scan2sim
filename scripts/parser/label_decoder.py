@@ -61,6 +61,13 @@ class HeadDecodeRule:
 def _default_decoder_config() -> Dict[str, Any]:
     return {
         "default_profile": "global",
+        "feature_weight_scale": {
+            "base": 1.0,
+            "contact": 1.0,
+            "overlap": 1.0,
+            "distance": 1.0,
+            "delta": 1.0,
+        },
         "decoder": {
             "default_label": 0,
             "heads": [],
@@ -98,6 +105,22 @@ def _deep_merge_dict(base: Mapping[str, Any], override: Mapping[str, Any]) -> Di
     return merged
 
 
+def _resolve_feature_weight_scale(feature: str, scale_cfg: Mapping[str, Any] | None) -> float:
+    if not isinstance(scale_cfg, Mapping):
+        return 1.0
+    feature_name = str(feature)
+    default_scale = _to_float(scale_cfg.get("base", 1.0), 1.0)
+    if feature_name.endswith("_delta"):
+        return max(_to_float(scale_cfg.get("delta", default_scale), default_scale), 0.0)
+    if ".contact" in feature_name:
+        return max(_to_float(scale_cfg.get("contact", default_scale), default_scale), 0.0)
+    if ".overlap_" in feature_name:
+        return max(_to_float(scale_cfg.get("overlap", default_scale), default_scale), 0.0)
+    if feature_name.endswith(".dist") or feature_name.endswith(".surface_gap"):
+        return max(_to_float(scale_cfg.get("distance", default_scale), default_scale), 0.0)
+    return max(default_scale, 0.0)
+
+
 def load_decoder_config(path: Path | None, profile: str | None = None) -> Dict[str, Any]:
     cfg = _default_decoder_config()
     if path is None:
@@ -127,7 +150,13 @@ def load_decoder_config(path: Path | None, profile: str | None = None) -> Dict[s
     return cfg
 
 
-def _parse_feature_term(head_name: str, class_label: Any, term_obj: Mapping[str, Any]) -> FeatureTerm:
+def _parse_feature_term(
+    head_name: str,
+    class_label: Any,
+    term_obj: Mapping[str, Any],
+    *,
+    scale_cfg: Mapping[str, Any] | None,
+) -> FeatureTerm:
     feature = str(term_obj.get("feature", "")).strip()
     if not feature:
         raise ValueError(f"decoder head '{head_name}' class '{class_label}' term requires 'feature'.")
@@ -139,9 +168,11 @@ def _parse_feature_term(head_name: str, class_label: Any, term_obj: Mapping[str,
             f"decoder head '{head_name}' class '{class_label}' term '{feature}' requires "
             "either target/tol or min/max."
         )
+    base_weight = float(term_obj.get("weight", 1.0))
+    weight_scale = _resolve_feature_weight_scale(feature, scale_cfg)
     return FeatureTerm(
         feature=feature,
-        weight=float(term_obj.get("weight", 1.0)),
+        weight=float(base_weight * weight_scale),
         min_value=None if min_value is None else float(min_value),
         max_value=None if max_value is None else float(max_value),
         target=None if target is None else float(target),
@@ -156,6 +187,9 @@ def _parse_head_rules(config: Mapping[str, Any]) -> List[HeadDecodeRule]:
     decoder_obj = config.get("decoder", {})
     if not isinstance(decoder_obj, Mapping):
         raise TypeError("decoder section must be object.")
+    scale_cfg = config.get("feature_weight_scale", {})
+    if not isinstance(scale_cfg, Mapping):
+        scale_cfg = {}
     default_label = decoder_obj.get("default_label", 0)
     heads_raw = decoder_obj.get("heads", [])
     if not isinstance(heads_raw, list) or not heads_raw:
@@ -181,7 +215,12 @@ def _parse_head_rules(config: Mapping[str, Any]) -> List[HeadDecodeRule]:
                 if not isinstance(terms_raw, list) or not terms_raw:
                     raise ValueError(f"decoder head '{name}' class '{label}' terms must be non-empty list.")
                 terms = tuple(
-                    _parse_feature_term(name, label, term_obj)
+                    _parse_feature_term(
+                        name,
+                        label,
+                        term_obj,
+                        scale_cfg=scale_cfg,
+                    )
                     for term_obj in terms_raw
                     if isinstance(term_obj, Mapping)
                 )

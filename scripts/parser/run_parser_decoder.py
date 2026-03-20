@@ -730,6 +730,12 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
         help="Label decoder rules YAML.",
     )
     parser.add_argument(
+        "--decoder-profile",
+        type=str,
+        default="global",
+        help="Decoder profile name in decoder-config (default: global).",
+    )
+    parser.add_argument(
         "--head-rules",
         type=str,
         default="configs/feature/label_rules.json",
@@ -823,9 +829,9 @@ def main(argv: List[str] | None = None) -> None:
     part_cfg = load_part_parser_config(part_config_path if part_config_path.exists() else None)
     decoder_cfg = load_decoder_config(
         decoder_config_path if decoder_config_path.exists() else None,
-        profile="global",
+        profile=str(args.decoder_profile),
     )
-    profile_source = "fixed_global"
+    profile_source = "cli"
     head_specs = load_head_specs(head_rules_path)
     head_class_values = {head.name: list(head.class_values) for head in head_specs}
     head_names = [head.name for head in head_specs]

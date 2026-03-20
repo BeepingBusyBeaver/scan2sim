@@ -333,3 +333,22 @@ consistency:
     - {type: pair_forbidden, heads: [LeftHipX, LeftKneeX], pairs: [[1, 0]], penalty: 0.55}
     - {type: pair_forbidden, heads: [RightShoulderX, RightElbowY], pairs: [[1, 0]], penalty: 0.30}
     - {type: pair_forbidden, heads: [LeftShoulderX, LeftElbowY], pairs: [[1, 0]], penalty: 0.30}
+
+profiles:
+  virtual_contact_v1:
+    feature_weight_scale:
+      base: 1.0
+      contact: 2.2
+      overlap: 1.5
+      distance: 0.75
+      delta: 0.45
+    temporal:
+      enabled: false
+    swap_validation:
+      enabled: false
+    consistency:
+      enabled: true
+      weight: 0.8
+      temporal_stickiness: 0.0
+      search_topk: 3
+      max_iter: 4

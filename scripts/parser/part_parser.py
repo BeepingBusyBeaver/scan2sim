@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import heapq
 from pathlib import Path
-from typing import Any, Dict, Mapping, MutableMapping, Tuple
+from typing import Any, Dict, Mapping, MutableMapping, Sequence, Tuple
 
 import numpy as np
 import open3d as o3d
@@ -98,6 +98,19 @@ def _default_config() -> Dict[str, Any]:
                 "max_shoulder_attach_dist": 0.24,
                 "attach_quantile": 0.30,
             },
+            "arm_spill_guard": {
+                "enabled": False,
+                "near_torso_lateral_scale": 1.05,
+                "clear_out_lateral_scale": 1.35,
+                "shoulder_to_hip_margin": 0.02,
+                "keep_top_y_norm": 0.62,
+                "min_keep_ratio": 0.35,
+            },
+            "leg_side_reassign": {
+                "enabled": False,
+                "side_penalty": 0.03,
+                "strong_side_margin": 0.03,
+            },
             "segment_split": {
                 "arm_prox_quantile": 0.55,
                 "leg_prox_quantile": 0.50,
@@ -111,6 +124,32 @@ def _default_config() -> Dict[str, Any]:
             "boundary_refine": {
                 "enabled": True,
                 "unresolved_max_dist": 0.09,
+                "side_consistency": {
+                    "enabled": True,
+                    "center_margin_x": 0.0,
+                    "legs": True,
+                    "arms": False,
+                    "use_anchor_midline": True,
+                    "distance_margin": 0.0,
+                    "leg_geodesic": {
+                        "enabled": False,
+                        "seed_fraction": 0.05,
+                        "k": 8,
+                        "radius_scale": 0.35,
+                        "min_pair_points": 80,
+                        "side_prior_margin": 0.004,
+                    },
+                    "leg_balance": {
+                        "enabled": False,
+                        "max_ratio": 1.55,
+                        "target_ratio": 1.35,
+                        "min_pair_points": 40,
+                        "min_move_advantage": -0.002,
+                        "max_move_fraction": 0.28,
+                        "allow_midline_fallback": True,
+                        "midline_proj_weight": 0.25,
+                    },
+                },
                 "head_cap": {
                     "enabled": True,
                     "y_margin_low": 0.04,
@@ -179,6 +218,29 @@ def _default_config() -> Dict[str, Any]:
                 "allow_small_parts": True,
                 "small_part_min_size": 0.025,
                 "robust_quantile": 0.03,
+                "point_filter": {
+                    "enabled": False,
+                    "eps": 0.065,
+                    "min_points": 6,
+                    "noise_attach_radius": 0.025,
+                    "min_keep_ratio": 0.42,
+                    "secondary_center_radius": 0.085,
+                    "enforce_leg_side": True,
+                    "enforce_arm_side": False,
+                    "side_margin_x": 0.0,
+                    "leg_strict": {
+                        "enabled": False,
+                        "noise_attach_radius": 0.0,
+                        "secondary_center_radius": 0.0,
+                        "min_keep_ratio": 0.55,
+                        "anchor_trim_quantile": 0.88,
+                    },
+                    "leg_anchor_gate": {
+                        "enabled": False,
+                        "margin": 0.01,
+                        "min_keep_ratio": 0.35,
+                    },
+                },
                 "contact_margin": 0.0,
                 "forbidden_margin": 0.003,
                 "limb_shape": {
@@ -203,6 +265,14 @@ def _default_config() -> Dict[str, Any]:
                     "min_long_axis": 0.085,
                     "min_aspect_ratio": 1.45,
                     "max_cross_axis": 0.16,
+                    "axis_guard": {
+                        "enabled": True,
+                        "parts": ["left_thigh", "right_thigh", "left_shin", "right_shin"],
+                        "min_alignment": 0.55,
+                        "force_blend": 0.80,
+                        "link_length_cap_scale": 2.20,
+                        "link_length_cap_min": 0.12,
+                    },
                 },
                 "hard_contact": {
                     "enabled": True,
@@ -898,6 +968,163 @@ def _exclude_torso_zone_from_arms(
     return filtered
 
 
+def _apply_arm_spill_guard(
+    arm_points: np.ndarray,
+    *,
+    shoulder_anchor: np.ndarray,
+    hip_anchor: np.ndarray,
+    torso_center: np.ndarray,
+    torso_half_width: float,
+    y_min: float,
+    y_max: float,
+    left_side: bool,
+    left_is_positive_x: bool,
+    cfg: Mapping[str, Any],
+) -> Tuple[np.ndarray, np.ndarray]:
+    if arm_points.shape[0] == 0:
+        return arm_points, _empty_points()
+    if not bool(cfg.get("enabled", True)):
+        return arm_points, _empty_points()
+
+    near_scale = max(float(cfg.get("near_torso_lateral_scale", 1.05)), 0.5)
+    clear_scale = max(float(cfg.get("clear_out_lateral_scale", 1.35)), near_scale + 0.05)
+    shoulder_to_hip_margin = max(float(cfg.get("shoulder_to_hip_margin", 0.02)), 0.0)
+    keep_top_y_norm = float(np.clip(float(cfg.get("keep_top_y_norm", 0.62)), 0.0, 1.0))
+    min_keep_ratio = float(np.clip(float(cfg.get("min_keep_ratio", 0.35)), 0.05, 0.95))
+
+    width = max(float(torso_half_width), 1e-6)
+    lateral = np.abs(arm_points[:, 0] - float(torso_center[0]))
+    near_torso = lateral <= (width * near_scale)
+    clearly_out = lateral >= (width * clear_scale)
+
+    y_low = min(float(shoulder_anchor[1]), float(hip_anchor[1])) - shoulder_to_hip_margin
+    y_high = max(float(shoulder_anchor[1]), float(hip_anchor[1])) + shoulder_to_hip_margin
+    y_mid_band = (arm_points[:, 1] >= y_low) & (arm_points[:, 1] <= y_high)
+    y_norm = (arm_points[:, 1] - float(y_min)) / max(float(y_max - y_min), 1e-6)
+    keep_top = y_norm >= keep_top_y_norm
+
+    outward_vec = shoulder_anchor - torso_center
+    outward_vec[1] = 0.0
+    outward_norm = float(np.linalg.norm(outward_vec))
+    if outward_norm <= 1e-8:
+        outward_unit = np.array([1.0 if (left_side == left_is_positive_x) else -1.0, 0.0, 0.0], dtype=np.float64)
+    else:
+        outward_unit = outward_vec / outward_norm
+    outward_proj = (arm_points - shoulder_anchor[None, :]) @ outward_unit
+    outward_keep = outward_proj >= 0.0
+
+    shoulder_keep_radius = max(width * 0.72, 0.065)
+    shoulder_dist = np.linalg.norm(arm_points - shoulder_anchor[None, :], axis=1)
+    near_shoulder = shoulder_dist <= shoulder_keep_radius
+
+    expected_side = _side_selector(
+        arm_points,
+        float(torso_center[0]),
+        left=left_side,
+        left_is_positive_x=left_is_positive_x,
+    )
+    remove = near_torso & y_mid_band & (~keep_top) & (~near_shoulder) & (~outward_keep)
+    remove |= near_torso & (~expected_side) & (~near_shoulder)
+    remove &= (~clearly_out)
+
+    remove_idx = np.flatnonzero(remove)
+    if remove_idx.size == 0:
+        return arm_points, _empty_points()
+
+    n_total = int(arm_points.shape[0])
+    min_keep = max(4, int(np.ceil(n_total * min_keep_ratio)))
+    max_remove = max(0, n_total - min_keep)
+    if remove_idx.size > max_remove:
+        spill_score = (
+            lateral[remove_idx]
+            + 0.18 * np.maximum(outward_proj[remove_idx], 0.0)
+            + 0.12 * shoulder_dist[remove_idx]
+        )
+        keep_remove = remove_idx[np.argsort(spill_score)[:max_remove]]
+        remove = np.zeros((n_total,), dtype=bool)
+        remove[keep_remove] = True
+
+    kept = arm_points[~remove]
+    spill = arm_points[remove]
+    return kept, spill
+
+
+def _reassign_side_points_by_anchors(
+    left_points: np.ndarray,
+    right_points: np.ndarray,
+    *,
+    left_anchor: np.ndarray,
+    right_anchor: np.ndarray,
+    center_x: float,
+    left_is_positive_x: bool,
+    cfg: Mapping[str, Any],
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    if (left_points.shape[0] + right_points.shape[0]) == 0:
+        return left_points, right_points, 0
+    if not bool(cfg.get("enabled", True)):
+        return left_points, right_points, 0
+
+    side_penalty = max(float(cfg.get("side_penalty", 0.03)), 0.0)
+    strong_side_margin = max(float(cfg.get("strong_side_margin", 0.0)), 0.0)
+    axis_from_anchors = bool(cfg.get("axis_from_anchors", True))
+
+    if left_points.shape[0] > 0 and right_points.shape[0] > 0:
+        points = np.concatenate([left_points, right_points], axis=0)
+        source_left = np.concatenate(
+            [
+                np.ones((left_points.shape[0],), dtype=bool),
+                np.zeros((right_points.shape[0],), dtype=bool),
+            ],
+            axis=0,
+        )
+    elif left_points.shape[0] > 0:
+        points = left_points
+        source_left = np.ones((left_points.shape[0],), dtype=bool)
+    else:
+        points = right_points
+        source_left = np.zeros((right_points.shape[0],), dtype=bool)
+
+    side_axis: np.ndarray | None = None
+    side_center = np.array([float(center_x), 0.0, 0.0], dtype=np.float64)
+    if axis_from_anchors and left_anchor.shape == (3,) and right_anchor.shape == (3,):
+        side_center = 0.5 * (left_anchor.astype(np.float64) + right_anchor.astype(np.float64))
+        vec = (left_anchor.astype(np.float64) - right_anchor.astype(np.float64)).copy()
+        vec[1] = 0.0
+        vec_norm = float(np.linalg.norm(vec))
+        if vec_norm > 1e-8:
+            side_axis = vec / vec_norm
+
+    if side_axis is not None:
+        proj = (points - side_center[None, :]) @ side_axis
+        expected_left = proj >= 0.0
+    else:
+        proj = None
+        expected_left = _side_selector(points, float(center_x), left=True, left_is_positive_x=left_is_positive_x)
+    d_left = np.linalg.norm(points - left_anchor[None, :], axis=1)
+    d_right = np.linalg.norm(points - right_anchor[None, :], axis=1)
+    score_left = d_left + np.where(expected_left, 0.0, side_penalty)
+    score_right = d_right + np.where(expected_left, side_penalty, 0.0)
+    assign_left = score_left <= score_right
+
+    if strong_side_margin > 0.0:
+        if proj is not None:
+            strong_left = proj >= strong_side_margin
+            strong_right = proj <= -strong_side_margin
+        else:
+            x_delta = points[:, 0] - float(center_x)
+            if left_is_positive_x:
+                strong_left = x_delta >= strong_side_margin
+                strong_right = x_delta <= -strong_side_margin
+            else:
+                strong_left = x_delta <= -strong_side_margin
+                strong_right = x_delta >= strong_side_margin
+        assign_left = np.where(strong_left, True, assign_left)
+        assign_left = np.where(strong_right, False, assign_left)
+
+    moved = int(np.count_nonzero(assign_left != source_left))
+    return points[assign_left], points[~assign_left], moved
+
+
 def _build_neighbor_graph(points: np.ndarray, k: int, radius: float) -> list[list[tuple[int, float]]]:
     n_points = int(points.shape[0])
     if n_points == 0:
@@ -1054,6 +1281,10 @@ def _refine_part_boundaries(
     leg_y: Tuple[float, float],
     head_y: Tuple[float, float],
     left_is_positive_x: bool,
+    left_shoulder_anchor: np.ndarray | None = None,
+    right_shoulder_anchor: np.ndarray | None = None,
+    left_hip_anchor: np.ndarray | None = None,
+    right_hip_anchor: np.ndarray | None = None,
     cfg: Mapping[str, Any],
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     if points.shape[0] == 0:
@@ -1088,11 +1319,31 @@ def _refine_part_boundaries(
     leg_reclaim_y_margin = float(leg_reclaim_cfg.get("y_margin", 0.03))
     leg_reclaim_max_attach_dist = float(leg_reclaim_cfg.get("max_leg_attach_dist", 0.12))
     leg_reclaim_margin = float(leg_reclaim_cfg.get("leg_vs_torso_margin", 0.004))
+    side_cfg = cfg.get("side_consistency", {}) if isinstance(cfg.get("side_consistency"), Mapping) else {}
+    side_enabled = bool(side_cfg.get("enabled", True))
+    side_center_margin_x = max(float(side_cfg.get("center_margin_x", 0.0)), 0.0)
+    side_legs_enabled = bool(side_cfg.get("legs", True))
+    side_arms_enabled = bool(side_cfg.get("arms", False))
+    side_use_anchor_midline = bool(side_cfg.get("use_anchor_midline", True))
+    side_distance_margin = max(float(side_cfg.get("distance_margin", 0.0)), 0.0)
+    side_force_proj_margin = max(float(side_cfg.get("force_side_projection_margin", 0.0)), 0.0)
+    leg_geo_cfg = side_cfg.get("leg_geodesic", {}) if isinstance(side_cfg.get("leg_geodesic"), Mapping) else {}
+    leg_geo_enabled = bool(leg_geo_cfg.get("enabled", False))
+    leg_geo_seed_fraction = float(np.clip(float(leg_geo_cfg.get("seed_fraction", 0.05)), 0.01, 0.20))
+    leg_geo_k = max(int(leg_geo_cfg.get("k", 8)), 3)
+    leg_geo_radius_scale = max(float(leg_geo_cfg.get("radius_scale", 0.35)), 0.05)
+    leg_geo_min_pair_points = max(int(leg_geo_cfg.get("min_pair_points", 80)), 10)
+    leg_geo_side_prior_margin = max(float(leg_geo_cfg.get("side_prior_margin", 0.004)), 0.0)
+    leg_geo_seed_side_margin = max(float(leg_geo_cfg.get("seed_side_margin", 0.0)), 0.0)
+    leg_geo_seed_side_min_points = max(int(leg_geo_cfg.get("seed_side_min_points", 3)), 0)
 
     head_assigned = 0
     unresolved_assigned = 0
     torso_reclaimed = 0
     torso_leg_reclaimed = 0
+    side_swapped_legs = 0
+    side_swapped_arms = 0
+    side_geodesic_legs = 0
 
     if head_cap_enabled and "head" in name_to_idx:
         head_idx = name_to_idx["head"]
@@ -1216,12 +1467,390 @@ def _refine_part_boundaries(
                 label_out[idx] = int(name_to_idx[best_leg_name])
                 torso_leg_reclaimed += 1
 
+    if side_enabled:
+        def _build_side_basis(
+            left_anchor: np.ndarray | None,
+            right_anchor: np.ndarray | None,
+        ) -> Tuple[np.ndarray, np.ndarray | None]:
+            center = np.array([float(torso_center[0]), float(torso_center[1]), float(torso_center[2])], dtype=np.float64)
+            axis: np.ndarray | None = None
+            if (
+                side_use_anchor_midline
+                and isinstance(left_anchor, np.ndarray)
+                and isinstance(right_anchor, np.ndarray)
+                and left_anchor.shape == (3,)
+                and right_anchor.shape == (3,)
+            ):
+                center = 0.5 * (left_anchor.astype(np.float64) + right_anchor.astype(np.float64))
+                vec = (left_anchor.astype(np.float64) - right_anchor.astype(np.float64)).copy()
+                vec[1] = 0.0
+                vec_norm = float(np.linalg.norm(vec))
+                if vec_norm > 1e-8:
+                    axis = vec / vec_norm
+            return center, axis
+
+        leg_center, leg_axis = _build_side_basis(left_hip_anchor, right_hip_anchor)
+        arm_center, arm_axis = _build_side_basis(left_shoulder_anchor, right_shoulder_anchor)
+
+        def _is_left_side(point: np.ndarray, center: np.ndarray, axis: np.ndarray | None) -> bool | None:
+            if axis is not None:
+                proj = float(np.dot(point - center, axis))
+                if abs(proj) <= side_center_margin_x:
+                    return None
+                return proj > 0.0
+            delta_x = float(point[0]) - float(center[0])
+            if abs(delta_x) <= side_center_margin_x:
+                return None
+            if left_is_positive_x:
+                return delta_x > 0.0
+            return delta_x < 0.0
+
+        def _apply_side_pair(
+            left_name: str,
+            right_name: str,
+            center: np.ndarray,
+            axis: np.ndarray | None,
+            left_anchor: np.ndarray | None,
+            right_anchor: np.ndarray | None,
+        ) -> int:
+            if left_name not in name_to_idx or right_name not in name_to_idx:
+                return 0
+            moved = 0
+            left_idx = int(name_to_idx[left_name])
+            right_idx = int(name_to_idx[right_name])
+            left_points_idx = np.flatnonzero(label_out == left_idx)
+            right_points_idx = np.flatnonzero(label_out == right_idx)
+            for point_idx in left_points_idx.tolist():
+                point = points[point_idx]
+                is_left = _is_left_side(point, center, axis)
+                if is_left is False:
+                    if axis is not None and side_force_proj_margin > 0.0:
+                        proj = float(np.dot(point - center, axis))
+                        if proj < -side_force_proj_margin:
+                            label_out[point_idx] = right_idx
+                            moved += 1
+                            continue
+                    if (
+                        isinstance(left_anchor, np.ndarray)
+                        and isinstance(right_anchor, np.ndarray)
+                        and left_anchor.shape == (3,)
+                        and right_anchor.shape == (3,)
+                    ):
+                        d_left = float(np.linalg.norm(point - left_anchor))
+                        d_right = float(np.linalg.norm(point - right_anchor))
+                        if d_right + side_distance_margin >= d_left:
+                            continue
+                    label_out[point_idx] = right_idx
+                    moved += 1
+            for point_idx in right_points_idx.tolist():
+                point = points[point_idx]
+                is_left = _is_left_side(point, center, axis)
+                if is_left is True:
+                    if axis is not None and side_force_proj_margin > 0.0:
+                        proj = float(np.dot(point - center, axis))
+                        if proj > side_force_proj_margin:
+                            label_out[point_idx] = left_idx
+                            moved += 1
+                            continue
+                    if (
+                        isinstance(left_anchor, np.ndarray)
+                        and isinstance(right_anchor, np.ndarray)
+                        and left_anchor.shape == (3,)
+                        and right_anchor.shape == (3,)
+                    ):
+                        d_left = float(np.linalg.norm(point - left_anchor))
+                        d_right = float(np.linalg.norm(point - right_anchor))
+                        if d_left + side_distance_margin >= d_right:
+                            continue
+                    label_out[point_idx] = left_idx
+                    moved += 1
+            return moved
+
+        def _apply_leg_geodesic_pair(left_name: str, right_name: str) -> int:
+            if left_name not in name_to_idx or right_name not in name_to_idx:
+                return 0
+            if not (
+                isinstance(left_hip_anchor, np.ndarray)
+                and isinstance(right_hip_anchor, np.ndarray)
+                and left_hip_anchor.shape == (3,)
+                and right_hip_anchor.shape == (3,)
+            ):
+                return 0
+            left_idx = int(name_to_idx[left_name])
+            right_idx = int(name_to_idx[right_name])
+            pair_idx = np.flatnonzero((label_out == left_idx) | (label_out == right_idx))
+            n_pair = int(pair_idx.size)
+            if n_pair < leg_geo_min_pair_points:
+                return 0
+            pair_points = points[pair_idx]
+            seed_n = max(2, min(n_pair // 3, int(np.ceil(n_pair * leg_geo_seed_fraction))))
+            d_left = np.linalg.norm(pair_points - left_hip_anchor[None, :], axis=1)
+            d_right = np.linalg.norm(pair_points - right_hip_anchor[None, :], axis=1)
+            left_seed = np.argsort(d_left)[:seed_n]
+            right_seed = np.argsort(d_right)[:seed_n]
+            if leg_axis is not None and leg_geo_seed_side_margin > 0.0:
+                proj_seed = (pair_points - leg_center[None, :]) @ leg_axis
+                left_side_idx = np.flatnonzero(proj_seed > leg_geo_seed_side_margin)
+                right_side_idx = np.flatnonzero(proj_seed < -leg_geo_seed_side_margin)
+                if left_side_idx.size >= leg_geo_seed_side_min_points:
+                    left_seed = left_side_idx[np.argsort(d_left[left_side_idx])[:seed_n]]
+                if right_side_idx.size >= leg_geo_seed_side_min_points:
+                    right_seed = right_side_idx[np.argsort(d_right[right_side_idx])[:seed_n]]
+            overlap = np.intersect1d(left_seed, right_seed, assume_unique=False)
+            if overlap.size > 0:
+                keep_left = overlap[d_left[overlap] <= d_right[overlap]]
+                keep_right = overlap[d_right[overlap] < d_left[overlap]]
+                left_seed = np.unique(np.concatenate([left_seed, keep_left], axis=0))
+                right_seed = np.unique(np.concatenate([right_seed, keep_right], axis=0))
+                left_seed = left_seed[~np.isin(left_seed, keep_right)]
+                right_seed = right_seed[~np.isin(right_seed, keep_left)]
+            if left_seed.size == 0 or right_seed.size == 0:
+                return 0
+
+            pair_center = np.mean(pair_points, axis=0)
+            pair_radius = float(np.quantile(np.linalg.norm(pair_points - pair_center[None, :], axis=1), 0.60))
+            geo_radius = max(pair_radius * leg_geo_radius_scale, 0.025)
+            graph = _build_neighbor_graph(pair_points, k=leg_geo_k, radius=geo_radius)
+            left_geo = _multi_source_dijkstra(graph, left_seed.tolist())
+            right_geo = _multi_source_dijkstra(graph, right_seed.tolist())
+            assign_left = left_geo <= right_geo
+
+            if leg_axis is not None and leg_geo_side_prior_margin > 0.0:
+                proj = (pair_points - leg_center[None, :]) @ leg_axis
+                assign_left = np.where(proj >= leg_geo_side_prior_margin, True, assign_left)
+                assign_left = np.where(proj <= -leg_geo_side_prior_margin, False, assign_left)
+
+            current_left = (label_out[pair_idx] == left_idx)
+            moved = int(np.count_nonzero(current_left != assign_left))
+            if moved <= 0:
+                return 0
+            label_out[pair_idx[assign_left]] = left_idx
+            label_out[pair_idx[~assign_left]] = right_idx
+            return moved
+
+        if side_legs_enabled and leg_geo_enabled:
+            side_geodesic_legs += _apply_leg_geodesic_pair("left_thigh", "right_thigh")
+            side_geodesic_legs += _apply_leg_geodesic_pair("left_shin", "right_shin")
+
+        if side_legs_enabled:
+            side_swapped_legs += _apply_side_pair(
+                "left_thigh",
+                "right_thigh",
+                leg_center,
+                leg_axis,
+                left_hip_anchor,
+                right_hip_anchor,
+            )
+            side_swapped_legs += _apply_side_pair(
+                "left_shin",
+                "right_shin",
+                leg_center,
+                leg_axis,
+                left_hip_anchor,
+                right_hip_anchor,
+            )
+        if side_arms_enabled:
+            side_swapped_arms += _apply_side_pair(
+                "left_upper_arm",
+                "right_upper_arm",
+                arm_center,
+                arm_axis,
+                left_shoulder_anchor,
+                right_shoulder_anchor,
+            )
+            side_swapped_arms += _apply_side_pair(
+                "left_lower_arm",
+                "right_lower_arm",
+                arm_center,
+                arm_axis,
+                left_shoulder_anchor,
+                right_shoulder_anchor,
+            )
+
+        leg_balance_cfg = side_cfg.get("leg_balance", {}) if isinstance(side_cfg.get("leg_balance"), Mapping) else {}
+        leg_balance_enabled = bool(leg_balance_cfg.get("enabled", False))
+        leg_balance_moved = 0
+        if leg_balance_enabled and side_legs_enabled:
+            leg_balance_max_ratio = max(float(leg_balance_cfg.get("max_ratio", 1.55)), 1.05)
+            leg_balance_target_ratio = float(np.clip(float(leg_balance_cfg.get("target_ratio", 1.35)), 1.0, leg_balance_max_ratio))
+            leg_balance_min_pair_points = max(int(leg_balance_cfg.get("min_pair_points", 40)), 4)
+            leg_balance_min_move_adv = float(leg_balance_cfg.get("min_move_advantage", -0.002))
+            leg_balance_max_move_fraction = float(np.clip(float(leg_balance_cfg.get("max_move_fraction", 0.28)), 0.02, 0.9))
+            leg_balance_allow_midline_fallback = bool(leg_balance_cfg.get("allow_midline_fallback", True))
+            leg_balance_midline_proj_weight = max(float(leg_balance_cfg.get("midline_proj_weight", 0.25)), 0.0)
+
+            def _rebalance_pair(
+                left_name: str,
+                right_name: str,
+                left_anchor: np.ndarray | None,
+                right_anchor: np.ndarray | None,
+            ) -> int:
+                if left_name not in name_to_idx or right_name not in name_to_idx:
+                    return 0
+                left_idx = int(name_to_idx[left_name])
+                right_idx = int(name_to_idx[right_name])
+                left_points_idx = np.flatnonzero(label_out == left_idx)
+                right_points_idx = np.flatnonzero(label_out == right_idx)
+                n_left = int(left_points_idx.size)
+                n_right = int(right_points_idx.size)
+                if n_left < leg_balance_min_pair_points or n_right < leg_balance_min_pair_points:
+                    return 0
+                if n_left > int(np.ceil(n_right * leg_balance_max_ratio)):
+                    big_name, big_idx = left_name, left_idx
+                    small_name, small_idx = right_name, right_idx
+                    big_points_idx = left_points_idx
+                    big_anchor, small_anchor = left_anchor, right_anchor
+                elif n_right > int(np.ceil(n_left * leg_balance_max_ratio)):
+                    big_name, big_idx = right_name, right_idx
+                    small_name, small_idx = left_name, left_idx
+                    big_points_idx = right_points_idx
+                    big_anchor, small_anchor = right_anchor, left_anchor
+                else:
+                    return 0
+                n_big = int(big_points_idx.size)
+                n_small = n_left + n_right - n_big
+                need_float = (n_big - leg_balance_target_ratio * n_small) / (1.0 + leg_balance_target_ratio)
+                n_need = max(0, int(np.ceil(need_float)))
+                n_cap = max(0, int(np.floor(n_big * leg_balance_max_move_fraction)))
+                n_move = min(n_need, n_cap)
+                if n_move <= 0:
+                    return 0
+
+                candidates: list[tuple[float, int]] = []
+                candidate_ids: set[int] = set()
+                for point_idx in big_points_idx.tolist():
+                    point = points[point_idx]
+                    is_left = _is_left_side(point, leg_center, leg_axis)
+                    side_mismatch = bool(
+                        (big_name.startswith("left_") and (is_left is False))
+                        or (big_name.startswith("right_") and (is_left is True))
+                    )
+                    advantage = 0.0
+                    if (
+                        isinstance(big_anchor, np.ndarray)
+                        and isinstance(small_anchor, np.ndarray)
+                        and big_anchor.shape == (3,)
+                        and small_anchor.shape == (3,)
+                    ):
+                        d_big = float(np.linalg.norm(point - big_anchor))
+                        d_small = float(np.linalg.norm(point - small_anchor))
+                        advantage = d_big - d_small
+                    if side_mismatch or (advantage >= leg_balance_min_move_adv):
+                        priority = (2.0 if side_mismatch else 0.0) + advantage
+                        candidates.append((priority, int(point_idx)))
+                        candidate_ids.add(int(point_idx))
+                candidates.sort(key=lambda item: item[0], reverse=True)
+                selected = [idx for _, idx in candidates[:n_move]]
+                if leg_balance_allow_midline_fallback and len(selected) < n_move:
+                    need = n_move - len(selected)
+                    fallback: list[tuple[float, int]] = []
+                    for point_idx in big_points_idx.tolist():
+                        point_idx = int(point_idx)
+                        if point_idx in candidate_ids:
+                            continue
+                        point = points[point_idx]
+                        if leg_axis is not None:
+                            proj_abs = abs(float(np.dot(point - leg_center, leg_axis)))
+                        else:
+                            proj_abs = abs(float(point[0]) - float(leg_center[0]))
+                        advantage = 0.0
+                        if (
+                            isinstance(big_anchor, np.ndarray)
+                            and isinstance(small_anchor, np.ndarray)
+                            and big_anchor.shape == (3,)
+                            and small_anchor.shape == (3,)
+                        ):
+                            d_big = float(np.linalg.norm(point - big_anchor))
+                            d_small = float(np.linalg.norm(point - small_anchor))
+                            advantage = d_big - d_small
+                        priority = (-proj_abs * leg_balance_midline_proj_weight) + advantage
+                        fallback.append((priority, point_idx))
+                    fallback.sort(key=lambda item: item[0], reverse=True)
+                    selected.extend([idx for _, idx in fallback[:need]])
+                if len(selected) == 0:
+                    return 0
+                for point_idx in selected:
+                    label_out[point_idx] = small_idx
+                return len(selected)
+
+            leg_balance_moved += _rebalance_pair("left_thigh", "right_thigh", left_hip_anchor, right_hip_anchor)
+            leg_balance_moved += _rebalance_pair("left_shin", "right_shin", left_hip_anchor, right_hip_anchor)
+        else:
+            leg_balance_moved = 0
+
+        leg_proj_purity_cfg = (
+            side_cfg.get("leg_projection_purity", {})
+            if isinstance(side_cfg.get("leg_projection_purity"), Mapping)
+            else {}
+        )
+        leg_proj_purity_enabled = bool(leg_proj_purity_cfg.get("enabled", False))
+        leg_proj_purity_margin = max(
+            float(leg_proj_purity_cfg.get("margin", 0.0)),
+            side_center_margin_x,
+        )
+        leg_proj_purity_min_pair_points = max(
+            int(leg_proj_purity_cfg.get("min_pair_points", 20)),
+            2,
+        )
+        leg_proj_purity_moved = 0
+        if leg_proj_purity_enabled and side_legs_enabled:
+            def _apply_projection_purity_pair(left_name: str, right_name: str) -> int:
+                if left_name not in name_to_idx or right_name not in name_to_idx:
+                    return 0
+                left_idx = int(name_to_idx[left_name])
+                right_idx = int(name_to_idx[right_name])
+                pair_idx = np.flatnonzero((label_out == left_idx) | (label_out == right_idx))
+                if int(pair_idx.size) < leg_proj_purity_min_pair_points:
+                    return 0
+                pair_points = points[pair_idx]
+                if leg_axis is not None:
+                    proj = (pair_points - leg_center[None, :]) @ leg_axis
+                    left_to_right = pair_idx[(label_out[pair_idx] == left_idx) & (proj < -leg_proj_purity_margin)]
+                    right_to_left = pair_idx[(label_out[pair_idx] == right_idx) & (proj > leg_proj_purity_margin)]
+                else:
+                    delta_x = pair_points[:, 0] - float(leg_center[0])
+                    if left_is_positive_x:
+                        left_to_right = pair_idx[(label_out[pair_idx] == left_idx) & (delta_x < -leg_proj_purity_margin)]
+                        right_to_left = pair_idx[(label_out[pair_idx] == right_idx) & (delta_x > leg_proj_purity_margin)]
+                    else:
+                        left_to_right = pair_idx[(label_out[pair_idx] == left_idx) & (delta_x > leg_proj_purity_margin)]
+                        right_to_left = pair_idx[(label_out[pair_idx] == right_idx) & (delta_x < -leg_proj_purity_margin)]
+                moved = 0
+                if left_to_right.size > 0:
+                    label_out[left_to_right] = right_idx
+                    moved += int(left_to_right.size)
+                if right_to_left.size > 0:
+                    label_out[right_to_left] = left_idx
+                    moved += int(right_to_left.size)
+                return moved
+
+            leg_proj_purity_moved += _apply_projection_purity_pair("left_thigh", "right_thigh")
+            leg_proj_purity_moved += _apply_projection_purity_pair("left_shin", "right_shin")
+    else:
+        leg_balance_enabled = False
+        leg_balance_moved = 0
+        leg_proj_purity_enabled = False
+        leg_proj_purity_moved = 0
+
     return label_out, {
         "enabled": True,
         "head_cap_assigned": int(head_assigned),
         "unresolved_assigned": int(unresolved_assigned),
         "torso_arm_reclaimed": int(torso_reclaimed),
         "torso_leg_reclaimed": int(torso_leg_reclaimed),
+        "side_consistency_enabled": bool(side_enabled),
+        "side_consistency_center_margin_x": float(side_center_margin_x),
+        "side_consistency_use_anchor_midline": bool(side_use_anchor_midline),
+        "side_consistency_distance_margin": float(side_distance_margin),
+        "side_consistency_leg_geodesic_enabled": bool(leg_geo_enabled),
+        "side_consistency_leg_geodesic_moved": int(side_geodesic_legs),
+        "side_consistency_swapped_legs": int(side_swapped_legs),
+        "side_consistency_swapped_arms": int(side_swapped_arms),
+        "side_consistency_leg_balance_enabled": bool(leg_balance_enabled),
+        "side_consistency_leg_balance_moved": int(leg_balance_moved),
+        "side_consistency_force_side_projection_margin": float(side_force_proj_margin),
+        "side_consistency_leg_projection_purity_enabled": bool(leg_proj_purity_enabled),
+        "side_consistency_leg_projection_purity_moved": int(leg_proj_purity_moved),
         "unresolved_after": int(np.count_nonzero(label_out < 0)),
     }
 
@@ -1471,6 +2100,7 @@ def _enforce_limb_shape_boxes(
     part_points: Mapping[str, np.ndarray],
     *,
     cfg: Mapping[str, Any] | None,
+    anchor_map: Mapping[str, np.ndarray] | None,
     min_points: int,
 ) -> Dict[str, PartBox]:
     shape_cfg = cfg if isinstance(cfg, Mapping) else {}
@@ -1488,6 +2118,17 @@ def _enforce_limb_shape_boxes(
     min_long_axis = max(float(shape_cfg.get("min_long_axis", 0.085)), 0.01)
     min_aspect_ratio = max(float(shape_cfg.get("min_aspect_ratio", 1.20)), 1.0)
     max_cross_axis = max(float(shape_cfg.get("max_cross_axis", 0.16)), 0.02)
+    axis_guard_cfg = shape_cfg.get("axis_guard", {}) if isinstance(shape_cfg.get("axis_guard"), Mapping) else {}
+    axis_guard_enabled = bool(axis_guard_cfg.get("enabled", True))
+    axis_guard_parts_raw = axis_guard_cfg.get("parts")
+    if isinstance(axis_guard_parts_raw, Sequence):
+        axis_guard_parts = {str(p) for p in axis_guard_parts_raw}
+    else:
+        axis_guard_parts = {"left_thigh", "right_thigh", "left_shin", "right_shin"}
+    axis_guard_min_alignment = float(np.clip(float(axis_guard_cfg.get("min_alignment", 0.55)), 0.0, 0.99))
+    axis_guard_force_blend = float(np.clip(float(axis_guard_cfg.get("force_blend", 0.80)), 0.0, 1.0))
+    axis_guard_link_cap_scale = max(float(axis_guard_cfg.get("link_length_cap_scale", 2.20)), 1.0)
+    axis_guard_link_cap_min = max(float(axis_guard_cfg.get("link_length_cap_min", 0.12)), 0.01)
 
     arm_secondary = "torso" if use_torso_secondary_arms else ""
     leg_secondary = "torso" if use_torso_secondary_legs else ""
@@ -1514,6 +2155,15 @@ def _enforce_limb_shape_boxes(
         size_seed = np.maximum(np.asarray(box.obb_size_xyz, dtype=np.float64), 1e-6)
         long_idx = int(np.argmax(size_seed))
         axis_long = axes_seed[:, long_idx]
+        anchor_vec: np.ndarray | None = None
+        if isinstance(anchor_map, Mapping):
+            anchor_raw = anchor_map.get(name)
+            if anchor_raw is not None:
+                anchor_arr = np.asarray(anchor_raw, dtype=np.float64)
+                if anchor_arr.shape == (3,):
+                    vec_anchor = center_seed - anchor_arr
+                    if float(np.linalg.norm(vec_anchor)) > 1e-6:
+                        anchor_vec = _normalize_vector(vec_anchor, axis_long)
 
         target_dirs: list[np.ndarray] = []
         if align_to_links:
@@ -1544,6 +2194,19 @@ def _enforce_limb_shape_boxes(
             if angle > 1e-6 and max_turn_rad > 0.0:
                 local_blend *= min(1.0, max_turn_rad / angle)
             axis_long = _normalize_vector((1.0 - local_blend) * axis_long + local_blend * target, axis_long)
+        if (
+            axis_guard_enabled
+            and name in axis_guard_parts
+            and anchor_vec is not None
+        ):
+            align = abs(float(np.dot(axis_long, anchor_vec)))
+            if align < axis_guard_min_alignment:
+                if float(np.dot(axis_long, anchor_vec)) < 0.0:
+                    axis_long = -axis_long
+                axis_long = _normalize_vector(
+                    (1.0 - axis_guard_force_blend) * axis_long + axis_guard_force_blend * anchor_vec,
+                    anchor_vec,
+                )
 
         hint_axis = axes_seed[:, (long_idx + 1) % 3]
         axes_new = _orthonormal_axes_from_primary(axis_long, hint_axis)
@@ -1558,6 +2221,19 @@ def _enforce_limb_shape_boxes(
         center_local = 0.5 * (lo + hi)
         center_new = center_seed + axes_new @ center_local
         long_size = max(float(ext[0]), min_long_axis, float(max(ext[1], ext[2])) * min_aspect_ratio)
+        if (
+            axis_guard_enabled
+            and name in axis_guard_parts
+            and isinstance(anchor_map, Mapping)
+        ):
+            anchor_raw = anchor_map.get(name)
+            if anchor_raw is not None:
+                anchor_arr = np.asarray(anchor_raw, dtype=np.float64)
+                if anchor_arr.shape == (3,):
+                    link_len = float(np.linalg.norm(center_new - anchor_arr))
+                    if link_len > 1e-6:
+                        long_cap = max(axis_guard_link_cap_min, link_len * axis_guard_link_cap_scale)
+                        long_size = min(long_size, long_cap)
         cross_1 = min(float(ext[1]), max_cross_axis)
         cross_2 = min(float(ext[2]), max_cross_axis)
         size_new = np.array([long_size, max(cross_1, 1e-6), max(cross_2, 1e-6)], dtype=np.float64)
@@ -1883,6 +2559,50 @@ def parse_parts_from_points(
     allow_small_parts = bool(box_post_cfg.get("allow_small_parts", True))
     small_part_min_size = float(box_post_cfg.get("small_part_min_size", 0.025))
     box_robust_quantile = float(box_post_cfg.get("robust_quantile", 0.03))
+    box_point_filter_cfg = (
+        box_post_cfg.get("point_filter", {})
+        if isinstance(box_post_cfg.get("point_filter"), Mapping)
+        else {}
+    )
+    box_point_filter_enabled = bool(box_point_filter_cfg.get("enabled", False))
+    box_point_filter_eps = float(box_point_filter_cfg.get("eps", 0.065))
+    box_point_filter_min_points = int(box_point_filter_cfg.get("min_points", 6))
+    box_point_filter_noise_attach_radius = float(box_point_filter_cfg.get("noise_attach_radius", 0.025))
+    box_point_filter_min_keep_ratio = float(box_point_filter_cfg.get("min_keep_ratio", 0.42))
+    box_point_filter_secondary_center_radius = float(box_point_filter_cfg.get("secondary_center_radius", 0.085))
+    box_point_filter_enforce_leg_side = bool(box_point_filter_cfg.get("enforce_leg_side", True))
+    box_point_filter_enforce_arm_side = bool(box_point_filter_cfg.get("enforce_arm_side", False))
+    box_point_filter_side_margin_x = max(float(box_point_filter_cfg.get("side_margin_x", 0.0)), 0.0)
+    box_point_filter_leg_strict_cfg = (
+        box_point_filter_cfg.get("leg_strict", {})
+        if isinstance(box_point_filter_cfg.get("leg_strict"), Mapping)
+        else {}
+    )
+    box_point_filter_leg_strict_enabled = bool(box_point_filter_leg_strict_cfg.get("enabled", False))
+    box_point_filter_leg_strict_noise_attach_radius = max(
+        float(box_point_filter_leg_strict_cfg.get("noise_attach_radius", 0.0)),
+        0.0,
+    )
+    box_point_filter_leg_strict_secondary_center_radius = max(
+        float(box_point_filter_leg_strict_cfg.get("secondary_center_radius", 0.0)),
+        0.0,
+    )
+    box_point_filter_leg_strict_min_keep_ratio = float(
+        np.clip(float(box_point_filter_leg_strict_cfg.get("min_keep_ratio", 0.55)), 0.10, 0.95)
+    )
+    box_point_filter_leg_strict_anchor_trim_quantile = float(
+        np.clip(float(box_point_filter_leg_strict_cfg.get("anchor_trim_quantile", 0.88)), 0.50, 0.99)
+    )
+    box_point_filter_leg_anchor_cfg = (
+        box_point_filter_cfg.get("leg_anchor_gate", {})
+        if isinstance(box_point_filter_cfg.get("leg_anchor_gate"), Mapping)
+        else {}
+    )
+    box_point_filter_leg_anchor_enabled = bool(box_point_filter_leg_anchor_cfg.get("enabled", False))
+    box_point_filter_leg_anchor_margin = max(float(box_point_filter_leg_anchor_cfg.get("margin", 0.01)), 0.0)
+    box_point_filter_leg_anchor_min_keep_ratio = float(
+        np.clip(float(box_point_filter_leg_anchor_cfg.get("min_keep_ratio", 0.35)), 0.10, 0.95)
+    )
     box_contact_mode = str(box_post_cfg.get("contact_mode", "mixed"))
     limb_shape_cfg = box_post_cfg.get("limb_shape", {}) if isinstance(box_post_cfg.get("limb_shape"), Mapping) else {}
     hard_contact_cfg = box_post_cfg.get("hard_contact", {}) if isinstance(box_post_cfg.get("hard_contact"), Mapping) else {}
@@ -1944,6 +2664,16 @@ def parse_parts_from_points(
     arm_absence_cfg = (
         parser_cfg.get("arm_absence_guard", {})
         if isinstance(parser_cfg.get("arm_absence_guard"), Mapping)
+        else {}
+    )
+    arm_spill_cfg = (
+        parser_cfg.get("arm_spill_guard", {})
+        if isinstance(parser_cfg.get("arm_spill_guard"), Mapping)
+        else {}
+    )
+    leg_side_reassign_cfg = (
+        parser_cfg.get("leg_side_reassign", {})
+        if isinstance(parser_cfg.get("leg_side_reassign"), Mapping)
         else {}
     )
     split_cfg = parser_cfg.get("segment_split", {}) if isinstance(parser_cfg.get("segment_split"), Mapping) else {}
@@ -2320,6 +3050,35 @@ def parse_parts_from_points(
             radius_scale_z=head_arm_guard_rz,
         )
 
+    left_arm_all, left_arm_spill = _apply_arm_spill_guard(
+        left_arm_all,
+        shoulder_anchor=left_shoulder_anchor,
+        hip_anchor=left_hip_anchor,
+        torso_center=torso_center,
+        torso_half_width=torso_half_width,
+        y_min=y_min,
+        y_max=y_max,
+        left_side=True,
+        left_is_positive_x=left_is_positive_x,
+        cfg=arm_spill_cfg,
+    )
+    right_arm_all, right_arm_spill = _apply_arm_spill_guard(
+        right_arm_all,
+        shoulder_anchor=right_shoulder_anchor,
+        hip_anchor=right_hip_anchor,
+        torso_center=torso_center,
+        torso_half_width=torso_half_width,
+        y_min=y_min,
+        y_max=y_max,
+        left_side=False,
+        left_is_positive_x=left_is_positive_x,
+        cfg=arm_spill_cfg,
+    )
+    if left_arm_spill.shape[0] > 0:
+        torso_points = np.concatenate([torso_points, left_arm_spill], axis=0) if torso_points.shape[0] > 0 else left_arm_spill
+    if right_arm_spill.shape[0] > 0:
+        torso_points = np.concatenate([torso_points, right_arm_spill], axis=0) if torso_points.shape[0] > 0 else right_arm_spill
+
     left_arm_all, left_leg_all, left_arm_absent = _apply_arm_absence_guard(
         left_arm_all,
         left_leg_all,
@@ -2337,6 +3096,16 @@ def parse_parts_from_points(
         y_min=y_min,
         y_max=y_max,
         cfg=arm_absence_cfg,
+    )
+
+    left_leg_all, right_leg_all, leg_side_moved = _reassign_side_points_by_anchors(
+        left_leg_all,
+        right_leg_all,
+        left_anchor=left_hip_anchor,
+        right_anchor=right_hip_anchor,
+        center_x=float(torso_center[0]),
+        left_is_positive_x=left_is_positive_x,
+        cfg=leg_side_reassign_cfg,
     )
 
     left_upper, left_lower = _assign_proximal_distal_by_anchor(
@@ -2544,6 +3313,10 @@ def parse_parts_from_points(
         leg_y=(float(leg_y[0]), float(leg_y[1])),
         head_y=(float(head_y[0]), float(head_y[1])),
         left_is_positive_x=left_is_positive_x,
+        left_shoulder_anchor=left_shoulder_anchor,
+        right_shoulder_anchor=right_shoulder_anchor,
+        left_hip_anchor=left_hip_anchor,
+        right_hip_anchor=right_hip_anchor,
         cfg=boundary_refine_cfg,
     )
     part_points = _rebuild_part_points_from_labels(points, point_labels_refined)
@@ -2568,13 +3341,155 @@ def parse_parts_from_points(
         if (left_thigh.size or left_shin.size or right_thigh.size or right_shin.size)
         else _empty_points()
     )
+    left_thigh_closer_right = 0
+    right_thigh_closer_left = 0
+    left_shin_closer_right = 0
+    right_shin_closer_left = 0
+    if left_thigh.shape[0] > 0:
+        d_l = np.linalg.norm(left_thigh - left_hip_anchor[None, :], axis=1)
+        d_r = np.linalg.norm(left_thigh - right_hip_anchor[None, :], axis=1)
+        left_thigh_closer_right = int(np.count_nonzero(d_r + 1e-9 < d_l))
+    if right_thigh.shape[0] > 0:
+        d_l = np.linalg.norm(right_thigh - left_hip_anchor[None, :], axis=1)
+        d_r = np.linalg.norm(right_thigh - right_hip_anchor[None, :], axis=1)
+        right_thigh_closer_left = int(np.count_nonzero(d_l + 1e-9 < d_r))
+    if left_shin.shape[0] > 0:
+        d_l = np.linalg.norm(left_shin - left_hip_anchor[None, :], axis=1)
+        d_r = np.linalg.norm(left_shin - right_hip_anchor[None, :], axis=1)
+        left_shin_closer_right = int(np.count_nonzero(d_r + 1e-9 < d_l))
+    if right_shin.shape[0] > 0:
+        d_l = np.linalg.norm(right_shin - left_hip_anchor[None, :], axis=1)
+        d_r = np.linalg.norm(right_shin - right_hip_anchor[None, :], axis=1)
+        right_shin_closer_left = int(np.count_nonzero(d_l + 1e-9 < d_r))
 
     boxes: Dict[str, PartBox] = {}
+    box_point_filter_removed_total = 0
+    box_anchor_map: Dict[str, np.ndarray] = {
+        "head": np.mean(head_points, axis=0) if head_points.shape[0] > 0 else torso_center,
+        "torso": torso_center,
+        "left_upper_arm": left_shoulder_anchor,
+        "right_upper_arm": right_shoulder_anchor,
+        "left_thigh": left_hip_anchor,
+        "right_thigh": right_hip_anchor,
+    }
+    box_anchor_map["left_lower_arm"] = (
+        np.mean(left_upper, axis=0) if left_upper.shape[0] > 0 else left_shoulder_anchor
+    )
+    box_anchor_map["right_lower_arm"] = (
+        np.mean(right_upper, axis=0) if right_upper.shape[0] > 0 else right_shoulder_anchor
+    )
+    box_anchor_map["left_shin"] = (
+        np.mean(left_thigh, axis=0) if left_thigh.shape[0] > 0 else left_hip_anchor
+    )
+    box_anchor_map["right_shin"] = (
+        np.mean(right_thigh, axis=0) if right_thigh.shape[0] > 0 else right_hip_anchor
+    )
     for name in DEFAULT_PART_ORDER:
         pts = part_points.get(name, _empty_points())
+        box_pts = pts
+        if box_point_filter_enabled and pts.shape[0] > max(6, min_points_per_part):
+            anchor = box_anchor_map.get(name)
+            if anchor is None or np.asarray(anchor).shape != (3,):
+                anchor = np.mean(pts, axis=0)
+            pf_noise_attach_radius = max(box_point_filter_noise_attach_radius, 0.0)
+            pf_secondary_center_radius = max(box_point_filter_secondary_center_radius, 0.0)
+            pf_min_keep_ratio = float(np.clip(box_point_filter_min_keep_ratio, 0.20, 0.95))
+            if box_point_filter_leg_strict_enabled and name in {"left_thigh", "left_shin", "right_thigh", "right_shin"}:
+                pf_noise_attach_radius = box_point_filter_leg_strict_noise_attach_radius
+                pf_secondary_center_radius = box_point_filter_leg_strict_secondary_center_radius
+                pf_min_keep_ratio = box_point_filter_leg_strict_min_keep_ratio
+            filtered = _filter_part_component_by_anchor(
+                pts,
+                np.asarray(anchor, dtype=np.float64),
+                eps=max(box_point_filter_eps, 1e-4),
+                min_points=max(box_point_filter_min_points, 2),
+                noise_attach_radius=pf_noise_attach_radius,
+                min_keep_ratio=pf_min_keep_ratio,
+                secondary_center_radius=pf_secondary_center_radius,
+                fallback_to_input=True,
+            )
+            if filtered.shape[0] > 0:
+                box_pts = filtered
+                box_point_filter_removed_total += int(max(0, pts.shape[0] - filtered.shape[0]))
+        enforce_side = False
+        if box_point_filter_enforce_leg_side and name in {"left_thigh", "left_shin", "right_thigh", "right_shin"}:
+            enforce_side = True
+        if box_point_filter_enforce_arm_side and name in {"left_upper_arm", "left_lower_arm", "right_upper_arm", "right_lower_arm"}:
+            enforce_side = True
+        if enforce_side and box_pts.shape[0] > max(6, min_points_per_part):
+            center_for_side = np.array([float(torso_center[0]), float(torso_center[1]), float(torso_center[2])], dtype=np.float64)
+            side_axis: np.ndarray | None = None
+            if name in {"left_thigh", "left_shin", "right_thigh", "right_shin"}:
+                center_for_side = 0.5 * (left_hip_anchor.astype(np.float64) + right_hip_anchor.astype(np.float64))
+                vec = (left_hip_anchor.astype(np.float64) - right_hip_anchor.astype(np.float64)).copy()
+                vec[1] = 0.0
+                vec_norm = float(np.linalg.norm(vec))
+                if vec_norm > 1e-8:
+                    side_axis = vec / vec_norm
+            elif name in {"left_upper_arm", "left_lower_arm", "right_upper_arm", "right_lower_arm"}:
+                center_for_side = 0.5 * (left_shoulder_anchor.astype(np.float64) + right_shoulder_anchor.astype(np.float64))
+                vec = (left_shoulder_anchor.astype(np.float64) - right_shoulder_anchor.astype(np.float64)).copy()
+                vec[1] = 0.0
+                vec_norm = float(np.linalg.norm(vec))
+                if vec_norm > 1e-8:
+                    side_axis = vec / vec_norm
+            if side_axis is not None:
+                proj = (box_pts - center_for_side[None, :]) @ side_axis
+                margin = float(box_point_filter_side_margin_x)
+                if margin > 0.0:
+                    left_mask = proj > margin
+                    right_mask = proj < -margin
+                else:
+                    left_mask = proj >= 0.0
+                    right_mask = ~left_mask
+            else:
+                left_mask = _side_selector(
+                    box_pts,
+                    float(center_for_side[0]),
+                    left=True,
+                    left_is_positive_x=left_is_positive_x,
+                )
+                right_mask = ~left_mask
+            side_mask = left_mask if name.startswith("left_") else right_mask
+            side_pts = box_pts[side_mask]
+            if side_pts.shape[0] >= max(min_points_per_part, int(np.ceil(box_pts.shape[0] * 0.30))):
+                box_point_filter_removed_total += int(max(0, box_pts.shape[0] - side_pts.shape[0]))
+                box_pts = side_pts
+        if (
+            box_point_filter_leg_anchor_enabled
+            and name in {"left_thigh", "left_shin", "right_thigh", "right_shin"}
+            and box_pts.shape[0] > max(6, min_points_per_part)
+        ):
+            d_left = np.linalg.norm(box_pts - left_hip_anchor[None, :], axis=1)
+            d_right = np.linalg.norm(box_pts - right_hip_anchor[None, :], axis=1)
+            if name.startswith("left_"):
+                keep = d_left <= (d_right + box_point_filter_leg_anchor_margin)
+            else:
+                keep = d_right <= (d_left + box_point_filter_leg_anchor_margin)
+            gated_pts = box_pts[keep]
+            min_keep = max(min_points_per_part, int(np.ceil(box_pts.shape[0] * box_point_filter_leg_anchor_min_keep_ratio)))
+            if gated_pts.shape[0] >= min_keep:
+                box_point_filter_removed_total += int(max(0, box_pts.shape[0] - gated_pts.shape[0]))
+                box_pts = gated_pts
+        if (
+            box_point_filter_leg_strict_enabled
+            and name in {"left_thigh", "left_shin", "right_thigh", "right_shin"}
+            and box_pts.shape[0] > max(6, min_points_per_part)
+        ):
+            anchor = box_anchor_map.get(name)
+            if anchor is None or np.asarray(anchor).shape != (3,):
+                anchor = np.mean(box_pts, axis=0)
+            d_anchor = np.linalg.norm(box_pts - np.asarray(anchor, dtype=np.float64)[None, :], axis=1)
+            d_thr = float(np.quantile(d_anchor, box_point_filter_leg_strict_anchor_trim_quantile))
+            keep = d_anchor <= (d_thr + 1e-9)
+            trimmed = box_pts[keep]
+            min_keep = max(min_points_per_part, int(np.ceil(box_pts.shape[0] * 0.45)))
+            if trimmed.shape[0] >= min_keep:
+                box_point_filter_removed_total += int(max(0, box_pts.shape[0] - trimmed.shape[0]))
+                box_pts = trimmed
         box = PartBox.from_points(
             name,
-            pts,
+            box_pts,
             min_points=min_points_per_part,
             allow_small=allow_small_parts,
             min_size=small_part_min_size,
@@ -2605,6 +3520,7 @@ def parse_parts_from_points(
             boxes,
             part_points,
             cfg=limb_shape_cfg,
+            anchor_map=box_anchor_map,
             min_points=min_points_per_part,
         )
 
@@ -2651,6 +3567,10 @@ def parse_parts_from_points(
         "torso_points": int(torso_points.shape[0]),
         "arm_points": int(arm_points.shape[0]),
         "leg_points": int(leg_points.shape[0]),
+        "left_thigh_closer_right": int(left_thigh_closer_right),
+        "right_thigh_closer_left": int(right_thigh_closer_left),
+        "left_shin_closer_right": int(left_shin_closer_right),
+        "right_shin_closer_left": int(right_shin_closer_left),
         "anchors": {
             "left_shoulder": [float(v) for v in left_shoulder_anchor.tolist()],
             "right_shoulder": [float(v) for v in right_shoulder_anchor.tolist()],
@@ -2675,6 +3595,15 @@ def parse_parts_from_points(
         "limb_shape_min_aspect_ratio": float(limb_shape_cfg.get("min_aspect_ratio", 1.2)),
         "allow_small_parts": allow_small_parts,
         "box_robust_quantile": float(box_robust_quantile),
+        "box_point_filter_enabled": bool(box_point_filter_enabled),
+        "box_point_filter_removed_points": int(box_point_filter_removed_total),
+        "box_point_filter_enforce_leg_side": bool(box_point_filter_enforce_leg_side),
+        "box_point_filter_enforce_arm_side": bool(box_point_filter_enforce_arm_side),
+        "box_point_filter_side_margin_x": float(box_point_filter_side_margin_x),
+        "box_point_filter_leg_strict_enabled": bool(box_point_filter_leg_strict_enabled),
+        "box_point_filter_leg_strict_anchor_trim_quantile": float(box_point_filter_leg_strict_anchor_trim_quantile),
+        "box_point_filter_leg_anchor_enabled": bool(box_point_filter_leg_anchor_enabled),
+        "box_point_filter_leg_anchor_margin": float(box_point_filter_leg_anchor_margin),
         "torso_limb_exclusion_enabled": torso_limb_excl_enabled,
         "torso_limb_assign_to_torso": torso_limb_assign_to_torso,
         "torso_limb_extra_points": int(np.count_nonzero(torso_limb_extra_mask)),
@@ -2685,8 +3614,13 @@ def parse_parts_from_points(
         "head_arm_guard_enabled": head_arm_guard_enabled,
         "arm_torso_guard_enabled": arm_torso_guard_enabled,
         "arm_absence_guard_enabled": bool(arm_absence_cfg.get("enabled", True)),
+        "arm_spill_guard_enabled": bool(arm_spill_cfg.get("enabled", True)),
+        "left_arm_spill_points": int(left_arm_spill.shape[0]),
+        "right_arm_spill_points": int(right_arm_spill.shape[0]),
         "left_arm_absent_guard": bool(left_arm_absent),
         "right_arm_absent_guard": bool(right_arm_absent),
+        "leg_side_reassign_enabled": bool(leg_side_reassign_cfg.get("enabled", True)),
+        "leg_side_reassign_moved_points": int(leg_side_moved),
         "arm_prox_reclaim_enabled": bool(arm_prox_reclaim_cfg.get("enabled", True)),
         "boundary_refine": boundary_meta,
         "part_grouping_enabled": part_group_enabled,

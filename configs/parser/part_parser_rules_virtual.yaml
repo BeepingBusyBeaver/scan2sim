@@ -35,7 +35,7 @@ parser:
   left_is_positive_x: true
   min_points_per_part: 6
   torso:
-    y_range: [0.44, 0.80]
+    y_range: [0.46, 0.76]
     x_scale: 1.05
     z_scale: 1.9
     x_percentile: 70.0
@@ -43,9 +43,9 @@ parser:
     limb_exclusion:
       enabled: true
       assign_to_torso: true
-      y_pad: 0.08
-      x_scale: 1.55
-      z_scale: 1.30
+      y_pad: 0.04
+      x_scale: 1.20
+      z_scale: 1.08
   torso_arm_salvage:
     enabled: false
     y_margin: 0.03
@@ -93,6 +93,18 @@ parser:
     min_median_y_norm: 0.42
     max_shoulder_attach_dist: 0.24
     attach_quantile: 0.30
+  arm_spill_guard:
+    enabled: false
+    near_torso_lateral_scale: 0.98
+    clear_out_lateral_scale: 1.25
+    shoulder_to_hip_margin: 0.02
+    keep_top_y_norm: 0.66
+    min_keep_ratio: 0.34
+  leg_side_reassign:
+    enabled: true
+    axis_from_anchors: true
+    side_penalty: 0.05
+    strong_side_margin: 0.03
   segment_split:
     arm_prox_quantile: 0.55
     leg_prox_quantile: 0.50
@@ -101,6 +113,51 @@ parser:
       prox_quantile: 0.84
       margin: 0.015
       max_move_ratio: 0.35
+  boundary_refine:
+    enabled: true
+    unresolved_max_dist: 0.09
+    side_consistency:
+      enabled: true
+      center_margin_x: 0.002
+      use_anchor_midline: true
+      distance_margin: 0.015
+      force_side_projection_margin: 0.010
+      legs: true
+      arms: false
+      leg_geodesic:
+        enabled: true
+        seed_fraction: 0.06
+        k: 8
+        radius_scale: 0.35
+        min_pair_points: 80
+        side_prior_margin: 0.010
+        seed_side_margin: 0.010
+        seed_side_min_points: 8
+      leg_balance:
+        enabled: false
+        max_ratio: 1.35
+        target_ratio: 1.20
+        min_pair_points: 40
+        min_move_advantage: -0.002
+        max_move_fraction: 0.25
+        allow_midline_fallback: false
+        midline_proj_weight: 0.25
+      leg_projection_purity:
+        enabled: true
+        margin: 0.010
+        min_pair_points: 30
+    torso_arm_reclaim:
+      enabled: true
+      y_margin: 0.03
+      lateral_x_scale: 0.70
+      frontal_z_scale: 0.70
+      max_arm_attach_dist: 0.11
+      arm_vs_torso_margin: 0.008
+    torso_leg_reclaim:
+      enabled: true
+      y_margin: 0.03
+      max_leg_attach_dist: 0.12
+      leg_vs_torso_margin: 0.004
   part_grouping:
     enabled: true
     cluster_eps: 0.070
@@ -125,11 +182,11 @@ parser:
     arm_torso_guard:
       enabled: true
       y_pad: 0.05
-      x_scale: 1.45
-      z_scale: 1.65
+      x_scale: 1.25
+      z_scale: 1.30
       shoulder_keep_radius_scale: 0.95
       shoulder_outward_min: 0.015
-      min_keep_ratio: 0.45
+      min_keep_ratio: 0.30
   temporal_box_stabilization:
     enabled: true
     center_alpha: 0.65
@@ -143,6 +200,26 @@ parser:
     allow_small_parts: true
     small_part_min_size: 0.025
     robust_quantile: 0.08
+    point_filter:
+      enabled: true
+      eps: 0.055
+      min_points: 6
+      noise_attach_radius: 0.02
+      min_keep_ratio: 0.40
+      secondary_center_radius: 0.07
+      enforce_leg_side: true
+      enforce_arm_side: false
+      side_margin_x: 0.002
+      leg_strict:
+        enabled: true
+        noise_attach_radius: 0.0
+        secondary_center_radius: 0.0
+        min_keep_ratio: 0.58
+        anchor_trim_quantile: 0.86
+      leg_anchor_gate:
+        enabled: true
+        margin: 0.012
+        min_keep_ratio: 0.35
     contact_margin: 0.0
     forbidden_margin: 0.003
     limb_shape:
@@ -166,6 +243,13 @@ parser:
       min_long_axis: 0.085
       min_aspect_ratio: 1.55
       max_cross_axis: 0.15
+      axis_guard:
+        enabled: true
+        parts: [left_thigh, right_thigh, left_shin, right_shin]
+        min_alignment: 0.62
+        force_blend: 0.86
+        link_length_cap_scale: 2.10
+        link_length_cap_min: 0.12
     hard_contact:
       enabled: true
       mode: shift

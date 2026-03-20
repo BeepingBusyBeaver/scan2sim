@@ -40,7 +40,7 @@ frame   0 5 9 13 16 20 23 26 30 0
 python -m scripts run-parser-pipeline \
   --input "data/virtual/pdbr_25421_lidar/*.ply" \
   --input-pattern "*.ply" \
-  --part-config configs/parser/part_parser_rules_v1.yaml \
+  --part-config configs/parser/part_parser_rules_virtual.yaml \
   --output-dir outputs/virtual_pdbr/parser_label \
   --viz-dir outputs/virtual_pdbr/parser_viz \
   --viz-write-lines \
@@ -475,6 +475,12 @@ def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-prefix", type=str, default="parser_label_")
     parser.add_argument("--part-config", type=str, default="configs/parser/part_parser_rules.yaml")
     parser.add_argument("--decoder-config", type=str, default="configs/parser/label_decoder_rules.yaml")
+    parser.add_argument(
+        "--decoder-profile",
+        type=str,
+        default="global",
+        help="Decoder profile name in decoder-config.",
+    )
     parser.add_argument("--head-rules", type=str, default="configs/feature/label_rules.json")
     parser.add_argument("--gt-jsonl", type=str, default=None)
     parser.add_argument("--gt-frame-offset", type=str, default="auto", choices=["auto", "0", "1"])
@@ -697,6 +703,8 @@ def main(argv: List[str] | None = None) -> None:
         str(resolve_repo_path(root, args.part_config)),
         "--decoder-config",
         str(resolve_repo_path(root, args.decoder_config)),
+        "--decoder-profile",
+        str(args.decoder_profile),
         "--head-rules",
         str(resolve_repo_path(root, args.head_rules)),
         "--gt-frame-offset",
