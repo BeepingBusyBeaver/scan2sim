@@ -20,6 +20,10 @@ COMMANDS: Dict[str, Tuple[str, str]] = {
     "run-parser-pipeline": ("scripts.pipeline.run_parser_decoder_pipeline", "main"),
     "run-parser-decoder": ("scripts.parser.run_parser_decoder", "main"),
     "run-parser": ("scripts.parser.run_parser_decoder", "main"),
+    "run-cmcf-pipeline": ("scripts.pipeline.run_cmcf_pipeline", "main"),
+    "run-cmcf": ("scripts.pipeline.run_cmcf_pipeline", "main"),
+    "cmcf-map": ("scripts.cmcf.map_prototypes", "main"),
+    "map-cmcf-prototypes": ("scripts.cmcf.map_prototypes", "main"),
     "build-parser-playback": ("scripts.parser.build_parser_playback", "main"),
     "build-playback": ("scripts.parser.build_parser_playback", "main"),
     "play-parser-playback": ("scripts.parser.play_parser_playback", "main"),
@@ -69,6 +73,8 @@ def print_help() -> None:
     print("  run-feature (PointNet++ feature-only inference)")
     print("  run-parser-pipeline (rule-based parser-decoder)")
     print("  run-parser-decoder (point cloud -> part boxes -> labels)")
+    print("  run-cmcf-pipeline (canonical marker correspondence + feature-only decode)")
+    print("  cmcf-map (query feature-map -> nearest virtual marker prototypes)")
     print("  build-parser-playback (PLY sequence -> compressed playback NPZ)")
     print("  play-parser-playback (NPZ playback in Open3D viewer)")
 

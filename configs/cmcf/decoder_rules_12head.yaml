@@ -1,0 +1,170 @@
+# configs/cmcf/decoder_rules_12head.yaml
+default_profile: global
+
+relations:
+  pairs:
+    - {a: torso, b: head}
+    - {a: torso, b: left_upper_arm}
+    - {a: left_upper_arm, b: left_lower_arm}
+    - {a: torso, b: right_upper_arm}
+    - {a: right_upper_arm, b: right_lower_arm}
+    - {a: torso, b: left_thigh}
+    - {a: left_thigh, b: left_shin}
+    - {a: torso, b: right_thigh}
+    - {a: right_thigh, b: right_shin}
+    - {a: left_thigh, b: right_thigh}
+    - {a: left_shin, b: right_shin}
+
+# 12-head exact decoder (feature-only; no Euler/quat/SMPL recovery)
+decoder:
+  default_label: 0
+  heads:
+    - name: RightHipX
+      fallback: 0
+      feature: pair.torso__right_thigh.dy
+      bins:
+        - {label: -1, min: -1.5, max: -0.10}
+        - {label: 0, min: -0.10, max: 0.10}
+        - {label: 1, min: 0.10, max: 1.5, closed_max: true}
+
+    - name: RightHipZ
+      fallback: 0
+      feature: pair.torso__right_thigh.dx
+      bins:
+        - {label: 1, min: -1.5, max: -0.08}
+        - {label: 0, min: -0.08, max: 0.08}
+        - {label: -1, min: 0.08, max: 1.5, closed_max: true}
+
+    - name: LeftHipX
+      fallback: 0
+      feature: pair.torso__left_thigh.dy
+      bins:
+        - {label: -1, min: -1.5, max: -0.10}
+        - {label: 0, min: -0.10, max: 0.10}
+        - {label: 1, min: 0.10, max: 1.5, closed_max: true}
+
+    - name: LeftHipZ
+      fallback: 0
+      feature: pair.torso__left_thigh.dx
+      bins:
+        - {label: -1, min: -1.5, max: -0.08}
+        - {label: 0, min: -0.08, max: 0.08}
+        - {label: 1, min: 0.08, max: 1.5, closed_max: true}
+
+    - name: RightKneeX
+      fallback: 0
+      classes:
+        - label: 0
+          terms:
+            - {feature: pair.right_thigh__right_shin.overlap_y, target: 0.74, tol: 0.26, weight: 1.0}
+            - {feature: pair.right_thigh__right_shin.dist, target: 0.21, tol: 0.12, weight: 0.45}
+            - {feature: pair.right_thigh__right_shin.contact, target: 0.95, tol: 0.14, weight: 0.30}
+            - {feature: pair.right_thigh__right_shin.overlap_y_delta, target: 0.0, tol: 0.18, weight: 0.12}
+        - label: 1
+          terms:
+            - {feature: pair.right_thigh__right_shin.overlap_y, target: 0.92, tol: 0.18, weight: 1.0}
+            - {feature: pair.right_thigh__right_shin.dist, target: 0.27, tol: 0.12, weight: 0.45}
+            - {feature: pair.right_thigh__right_shin.contact, target: 0.90, tol: 0.16, weight: 0.30}
+            - {feature: pair.right_thigh__right_shin.overlap_y_delta, target: 0.0, tol: 0.18, weight: 0.12}
+
+    - name: LeftKneeX
+      fallback: 0
+      classes:
+        - label: 0
+          terms:
+            - {feature: pair.left_thigh__left_shin.overlap_y, target: 0.74, tol: 0.26, weight: 1.0}
+            - {feature: pair.left_thigh__left_shin.dist, target: 0.21, tol: 0.12, weight: 0.45}
+            - {feature: pair.left_thigh__left_shin.contact, target: 0.95, tol: 0.14, weight: 0.30}
+            - {feature: pair.left_thigh__left_shin.overlap_y_delta, target: 0.0, tol: 0.18, weight: 0.12}
+        - label: 1
+          terms:
+            - {feature: pair.left_thigh__left_shin.overlap_y, target: 0.92, tol: 0.18, weight: 1.0}
+            - {feature: pair.left_thigh__left_shin.dist, target: 0.27, tol: 0.12, weight: 0.45}
+            - {feature: pair.left_thigh__left_shin.contact, target: 0.90, tol: 0.16, weight: 0.30}
+            - {feature: pair.left_thigh__left_shin.overlap_y_delta, target: 0.0, tol: 0.18, weight: 0.12}
+
+    - name: RightShoulderX
+      fallback: 0
+      feature: pair.torso__right_upper_arm.dy
+      bins:
+        - {label: -1, min: -1.5, max: -0.10}
+        - {label: 0, min: -0.10, max: 0.10}
+        - {label: 1, min: 0.10, max: 1.5, closed_max: true}
+
+    - name: RightShoulderZ
+      fallback: 0
+      feature: pair.torso__right_upper_arm.dz
+      bins:
+        - {label: -1, min: -1.5, max: -0.08}
+        - {label: 0, min: -0.08, max: 0.08}
+        - {label: 1, min: 0.08, max: 1.5, closed_max: true}
+
+    - name: LeftShoulderX
+      fallback: 0
+      feature: pair.torso__left_upper_arm.dy
+      bins:
+        - {label: -1, min: -1.5, max: -0.10}
+        - {label: 0, min: -0.10, max: 0.10}
+        - {label: 1, min: 0.10, max: 1.5, closed_max: true}
+
+    - name: LeftShoulderZ
+      fallback: 0
+      feature: pair.torso__left_upper_arm.dz
+      bins:
+        - {label: -1, min: -1.5, max: -0.08}
+        - {label: 0, min: -0.08, max: 0.08}
+        - {label: 1, min: 0.08, max: 1.5, closed_max: true}
+
+    - name: RightElbowY
+      fallback: 0
+      classes:
+        - label: 0
+          terms:
+            - {feature: pair.right_upper_arm__right_lower_arm.overlap_y, target: 0.90, tol: 0.24, weight: 1.0}
+            - {feature: pair.right_upper_arm__right_lower_arm.dist, target: 0.16, tol: 0.10, weight: 0.45}
+            - {feature: pair.right_upper_arm__right_lower_arm.contact, target: 0.96, tol: 0.14, weight: 0.35}
+            - {feature: pair.right_upper_arm__right_lower_arm.overlap_y_delta, target: 0.0, tol: 0.18, weight: 0.12}
+        - label: 1
+          terms:
+            - {feature: pair.right_upper_arm__right_lower_arm.overlap_y, target: 0.58, tol: 0.26, weight: 1.0}
+            - {feature: pair.right_upper_arm__right_lower_arm.dist, target: 0.24, tol: 0.10, weight: 0.45}
+            - {feature: pair.right_upper_arm__right_lower_arm.contact, target: 0.88, tol: 0.16, weight: 0.35}
+            - {feature: pair.right_upper_arm__right_lower_arm.overlap_y_delta, target: 0.0, tol: 0.18, weight: 0.12}
+
+    - name: LeftElbowY
+      fallback: 0
+      classes:
+        - label: 0
+          terms:
+            - {feature: pair.left_upper_arm__left_lower_arm.overlap_y, target: 0.90, tol: 0.24, weight: 1.0}
+            - {feature: pair.left_upper_arm__left_lower_arm.dist, target: 0.16, tol: 0.10, weight: 0.45}
+            - {feature: pair.left_upper_arm__left_lower_arm.contact, target: 0.96, tol: 0.14, weight: 0.35}
+            - {feature: pair.left_upper_arm__left_lower_arm.overlap_y_delta, target: 0.0, tol: 0.18, weight: 0.12}
+        - label: 1
+          terms:
+            - {feature: pair.left_upper_arm__left_lower_arm.overlap_y, target: 0.58, tol: 0.26, weight: 1.0}
+            - {feature: pair.left_upper_arm__left_lower_arm.dist, target: 0.24, tol: 0.10, weight: 0.45}
+            - {feature: pair.left_upper_arm__left_lower_arm.contact, target: 0.88, tol: 0.16, weight: 0.35}
+            - {feature: pair.left_upper_arm__left_lower_arm.overlap_y_delta, target: 0.0, tol: 0.18, weight: 0.12}
+
+temporal:
+  enabled: true
+  hysteresis_margin: 0.03
+  window_size: 3
+  majority_min_count: 2
+
+swap_validation:
+  enabled: false
+
+consistency:
+  enabled: true
+  weight: 0.8
+  temporal_stickiness: 0.08
+  search_topk: 3
+  max_iter: 4
+  rules:
+    - {type: abs_diff_le, heads: [RightKneeX, LeftKneeX], max_diff: 1, penalty: 0.45}
+    - {type: abs_diff_le, heads: [RightHipX, LeftHipX], max_diff: 1, penalty: 0.40}
+    - {type: abs_diff_le, heads: [RightShoulderX, LeftShoulderX], max_diff: 1, penalty: 0.35}
+    - {type: pair_forbidden, heads: [RightHipX, RightKneeX], pairs: [[1, 0]], penalty: 0.50}
+    - {type: pair_forbidden, heads: [LeftHipX, LeftKneeX], pairs: [[1, 0]], penalty: 0.50}

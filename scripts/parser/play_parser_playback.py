@@ -103,14 +103,16 @@ def _run_headless_loop(
             return
 
 
-def _resolve_frame_part_counts(
+def _resolve_component_counts(
     *,
     payload: np.lib.npyio.NpzFile,
     frame_offsets: np.ndarray,
     total_frames: int,
+    count_key: str,
+    source_key: str,
 ) -> np.ndarray | None:
-    if "frame_part_counts" in payload.files:
-        counts = np.asarray(payload["frame_part_counts"], dtype=np.int64)
+    if count_key in payload.files:
+        counts = np.asarray(payload[count_key], dtype=np.int64)
         if counts.ndim == 1 and counts.shape[0] == total_frames:
             for frame_idx in range(total_frames):
                 frame_total = int(frame_offsets[frame_idx + 1] - frame_offsets[frame_idx])
@@ -118,18 +120,19 @@ def _resolve_frame_part_counts(
                 if value < 0 or value > frame_total:
                     return None
             return counts
-    if "source_parts" not in payload.files:
+    if source_key not in payload.files:
         return None
 
-    source_parts = np.asarray(payload["source_parts"])
-    if source_parts.ndim != 1 or source_parts.shape[0] != total_frames:
+    source_paths = np.asarray(payload[source_key])
+    if source_paths.ndim != 1 or source_paths.shape[0] != total_frames:
         return None
 
     counts = np.zeros((total_frames,), dtype=np.int64)
-    for frame_idx, raw_path in enumerate(source_parts):
+    for frame_idx, raw_path in enumerate(source_paths):
         path = Path(str(raw_path))
         if not path.exists() or (not path.is_file()):
-            return None
+            counts[frame_idx] = 0
+            continue
         cloud = o3d.io.read_point_cloud(str(path))
         points = np.asarray(cloud.points)
         count = int(points.shape[0]) if points.ndim == 2 and points.shape[1] == 3 else 0
@@ -137,7 +140,7 @@ def _resolve_frame_part_counts(
         if count < 0 or count > frame_total:
             return None
         counts[frame_idx] = count
-    print("[play-parser-playback] box toggle metadata inferred from source_parts.")
+    print(f"[play-parser-playback] '{count_key}' inferred from '{source_key}'.")
     return counts
 
 
@@ -147,7 +150,9 @@ class _GuiPlaybackState:
     paused: bool
     loop: bool
     running: bool
+    show_part_colors: bool
     show_boxes: bool
+    show_markers: bool
     last_tick_ts: float
     tick_accum: float
     tick_counter: int
@@ -158,7 +163,10 @@ def _run_gui_loop(
     points: np.ndarray,
     colors: np.ndarray,
     frame_offsets: np.ndarray,
-    frame_part_counts: np.ndarray | None,
+    frame_part_counts: np.ndarray,
+    frame_raw_counts: np.ndarray,
+    frame_line_counts: np.ndarray,
+    frame_marker_counts: np.ndarray,
     frame_names: np.ndarray,
     frame_indices: Sequence[int],
     total_frames: int,
@@ -190,17 +198,10 @@ def _run_gui_loop(
     scene_widget.scene.set_background([float(bg[0]), float(bg[1]), float(bg[2]), 1.0])
     scene_widget.set_view_controls(gui.SceneWidget.Controls.ROTATE_CAMERA_SPHERE)
     window.add_child(scene_widget)
-    has_box_points = False
-    if frame_part_counts is not None:
-        for frame_idx in frame_indices:
-            total_count = int(frame_offsets[frame_idx + 1] - frame_offsets[frame_idx])
-            part_count = int(frame_part_counts[frame_idx])
-            if total_count > part_count:
-                has_box_points = True
-                break
-    box_toggle_supported = frame_part_counts is not None and has_box_points
-    if frame_part_counts is not None and not has_box_points:
-        print("[play-parser-playback] no part-box points in playback. Rebuild NPZ with line-set inputs.")
+    has_part_points = any(int(frame_part_counts[frame_idx]) > 0 for frame_idx in frame_indices)
+    has_raw_points = any(int(frame_raw_counts[frame_idx]) > 0 for frame_idx in frame_indices)
+    has_box_points = any(int(frame_line_counts[frame_idx]) > 0 for frame_idx in frame_indices)
+    has_marker_points = any(int(frame_marker_counts[frame_idx]) > 0 for frame_idx in frame_indices)
 
     hud_frame = gui.Label("")
     hud_frame.text_color = gui.Color(1.0, 1.0, 1.0)
@@ -208,8 +209,15 @@ def _run_gui_loop(
     window.add_child(hud_frame)
 
     help_text = "Keys: ←/→ step, ↑/↓ jump, Space play/pause, Home/End"
-    if box_toggle_supported:
-        help_text += ", B boxes on/off"
+    if has_part_points:
+        if has_raw_points:
+            help_text += ", C part-color/raw"
+        else:
+            help_text += ", C part-color on/off"
+    if has_box_points:
+        help_text += ", B box on/off"
+    if has_marker_points:
+        help_text += ", M marker on/off"
     hud_help = gui.Label(help_text)
     hud_help.text_color = gui.Color(0.95, 0.95, 0.95)
     hud_help.background_color = gui.Color(0.0, 0.0, 0.0, 0.55)
@@ -242,7 +250,9 @@ def _run_gui_loop(
         paused=False,
         loop=bool(loop),
         running=True,
+        show_part_colors=True,
         show_boxes=True,
+        show_markers=True,
         last_tick_ts=time.monotonic(),
         tick_accum=0.0,
         tick_counter=0,
@@ -252,23 +262,72 @@ def _run_gui_loop(
         current_frame_idx = int(frame_indices[state.frame_pos])
         current_name = _frame_name(frame_names, current_frame_idx)
         mode = "PAUSE" if state.paused else "PLAY"
-        if box_toggle_supported:
-            box_state = "BOX:ON" if state.show_boxes else "BOX:OFF"
+        if has_part_points:
+            if has_raw_points:
+                part_state = "PART:COLOR" if state.show_part_colors else "PART:RAW"
+            else:
+                part_state = "PART:ON" if state.show_part_colors else "PART:OFF"
         else:
-            box_state = "BOX:N/A"
-        hud_frame.text = f"{mode} | {box_state} | frame {current_frame_idx}/{total_frames - 1} | {current_name}"
+            part_state = "PART:N/A"
+        box_state = "BOX:ON" if (has_box_points and state.show_boxes) else ("BOX:OFF" if has_box_points else "BOX:N/A")
+        marker_state = (
+            "MARKER:ON" if (has_marker_points and state.show_markers) else ("MARKER:OFF" if has_marker_points else "MARKER:N/A")
+        )
+        hud_frame.text = (
+            f"{mode} | {part_state} | {box_state} | {marker_state} | "
+            f"frame {current_frame_idx}/{total_frames - 1} | {current_name}"
+        )
         window.post_redraw()
 
     def _render_current_frame(*, log_frame: bool) -> None:
         current_frame_idx = int(frame_indices[state.frame_pos])
         lo_full, hi_full = _frame_bounds(frame_offsets, current_frame_idx)
-        lo, hi = lo_full, hi_full
-        if box_toggle_supported and (not state.show_boxes):
-            part_count = int(frame_part_counts[current_frame_idx])
-            part_count = max(0, min(part_count, hi_full - lo_full))
-            hi = lo_full + part_count
-        cloud.points = o3d.utility.Vector3dVector(points[lo:hi])
-        cloud.colors = o3d.utility.Vector3dVector(colors[lo:hi])
+        frame_total = int(max(0, hi_full - lo_full))
+        part_count = int(max(0, min(int(frame_part_counts[current_frame_idx]), frame_total)))
+        rem = max(0, frame_total - part_count)
+        raw_count = int(max(0, min(int(frame_raw_counts[current_frame_idx]), rem)))
+        rem -= raw_count
+        line_count = int(max(0, min(int(frame_line_counts[current_frame_idx]), rem)))
+        rem -= line_count
+        marker_count = int(max(0, min(int(frame_marker_counts[current_frame_idx]), rem)))
+        rem -= marker_count
+        if rem > 0:
+            line_count += rem
+
+        part_lo, part_hi = lo_full, lo_full + part_count
+        raw_lo, raw_hi = part_hi, part_hi + raw_count
+        line_lo, line_hi = raw_hi, raw_hi + line_count
+        marker_lo, marker_hi = line_hi, line_hi + marker_count
+
+        selected_pts = []
+        selected_cols = []
+        if has_part_points:
+            if state.show_part_colors:
+                if part_count > 0:
+                    selected_pts.append(points[part_lo:part_hi])
+                    selected_cols.append(colors[part_lo:part_hi])
+            elif has_raw_points and raw_count > 0:
+                selected_pts.append(points[raw_lo:raw_hi])
+                selected_cols.append(colors[raw_lo:raw_hi])
+            elif part_count > 0:
+                selected_pts.append(points[part_lo:part_hi])
+                selected_cols.append(np.tile(np.array([[0.70, 0.70, 0.70]], dtype=np.float64), (part_count, 1)))
+        if has_box_points and state.show_boxes and line_count > 0:
+            selected_pts.append(points[line_lo:line_hi])
+            selected_cols.append(colors[line_lo:line_hi])
+        if has_marker_points and state.show_markers and marker_count > 0:
+            selected_pts.append(points[marker_lo:marker_hi])
+            selected_cols.append(colors[marker_lo:marker_hi])
+
+        if selected_pts:
+            view_pts = np.concatenate(selected_pts, axis=0)
+            view_cols = np.concatenate(selected_cols, axis=0)
+        else:
+            view_pts = np.zeros((0, 3), dtype=np.float64)
+            view_cols = np.zeros((0, 3), dtype=np.float64)
+
+        cloud.points = o3d.utility.Vector3dVector(view_pts)
+        cloud.colors = o3d.utility.Vector3dVector(view_cols)
         if scene_widget.scene.has_geometry(geom_name):
             scene_widget.scene.remove_geometry(geom_name)
         scene_widget.scene.add_geometry(geom_name, cloud, material)
@@ -336,8 +395,18 @@ def _run_gui_loop(
             _render_current_frame(log_frame=False)
             return True
         if key == gui.KeyName.B:
-            if box_toggle_supported:
+            if has_box_points:
                 state.show_boxes = not state.show_boxes
+                _render_current_frame(log_frame=False)
+            return True
+        if key == gui.KeyName.C:
+            if has_part_points:
+                state.show_part_colors = not state.show_part_colors
+                _render_current_frame(log_frame=False)
+            return True
+        if key == gui.KeyName.M:
+            if has_marker_points:
+                state.show_markers = not state.show_markers
                 _render_current_frame(log_frame=False)
             return True
         return False
@@ -426,17 +495,72 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         return
 
-    frame_part_counts = _resolve_frame_part_counts(
+    frame_part_counts = _resolve_component_counts(
         payload=payload,
         frame_offsets=frame_offsets,
         total_frames=total_frames,
+        count_key="frame_part_counts",
+        source_key="source_parts",
     )
+    frame_line_counts = _resolve_component_counts(
+        payload=payload,
+        frame_offsets=frame_offsets,
+        total_frames=total_frames,
+        count_key="frame_line_counts",
+        source_key="source_lines",
+    )
+    frame_raw_counts = _resolve_component_counts(
+        payload=payload,
+        frame_offsets=frame_offsets,
+        total_frames=total_frames,
+        count_key="frame_raw_counts",
+        source_key="source_raw",
+    )
+    frame_marker_counts = _resolve_component_counts(
+        payload=payload,
+        frame_offsets=frame_offsets,
+        total_frames=total_frames,
+        count_key="frame_marker_counts",
+        source_key="source_markers",
+    )
+
+    if frame_part_counts is None:
+        frame_part_counts = np.array(
+            [int(frame_offsets[i + 1] - frame_offsets[i]) for i in range(total_frames)],
+            dtype=np.int64,
+        )
+    if frame_line_counts is None:
+        frame_line_counts = np.zeros((total_frames,), dtype=np.int64)
+    if frame_raw_counts is None:
+        frame_raw_counts = np.zeros((total_frames,), dtype=np.int64)
+    if frame_marker_counts is None:
+        frame_marker_counts = np.zeros((total_frames,), dtype=np.int64)
+
+    for frame_idx in range(total_frames):
+        frame_total = int(max(0, frame_offsets[frame_idx + 1] - frame_offsets[frame_idx]))
+        part_count = int(max(0, min(int(frame_part_counts[frame_idx]), frame_total)))
+        rem = frame_total - part_count
+        raw_count = int(max(0, min(int(frame_raw_counts[frame_idx]), rem)))
+        rem -= raw_count
+        line_count = int(max(0, min(int(frame_line_counts[frame_idx]), rem)))
+        rem -= line_count
+        marker_count = int(max(0, min(int(frame_marker_counts[frame_idx]), rem)))
+        rem -= marker_count
+        if rem > 0:
+            line_count += rem
+        frame_part_counts[frame_idx] = part_count
+        frame_raw_counts[frame_idx] = raw_count
+        frame_line_counts[frame_idx] = line_count
+        frame_marker_counts[frame_idx] = marker_count
 
     gui_ok = _run_gui_loop(
         points=points,
         colors=colors,
         frame_offsets=frame_offsets,
         frame_part_counts=frame_part_counts,
+        frame_raw_counts=frame_raw_counts,
+        frame_line_counts=frame_line_counts,
+        frame_marker_counts=frame_marker_counts,
         frame_names=frame_names,
         frame_indices=frame_indices,
         total_frames=total_frames,

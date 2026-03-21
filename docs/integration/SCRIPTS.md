@@ -20,6 +20,8 @@ Canonical pipeline commands:
 - `run-feature`: PointNet++ feature-only 추론 실행
 - `run-parser-pipeline`: rule-based parser-decoder 일괄 실행
 - `run-parser-decoder`: point cloud -> part boxes -> relation -> 15 labels
+- `run-cmcf-pipeline`: canonical marker correspondence field 생성 + feature-only 12-head 디코딩
+- `cmcf-map`: query frame feature-map을 virtual prototype bank에 매핑
 
 PointNet++ train note:
 - `train-feature`는 기본으로 `weights/pointnet2/.../pointnet2_ssg_wo_normals_best_model.pth`를 encoder 초기화에 사용하고, 15-head는 새로 학습합니다.
@@ -29,9 +31,13 @@ Pipeline modules:
 - `scripts/pipeline/run_livehps_pipeline.py`
 - `scripts/pipeline/run_feature_pipeline.py`
 - `scripts/pipeline/run_parser_decoder_pipeline.py`
+- `scripts/pipeline/run_cmcf_pipeline.py`
+- `scripts/cmcf/run_cmcf_pipeline.py`
+- `scripts/cmcf/map_prototypes.py`
 - `scripts/infer/infer_feature_classifier.py` (feature backend)
 - `scripts/parser/run_parser_decoder.py` (rule-based backend)
 
 Equivalent long-form names are also supported:
 - `pcap-to-pcd`, `pcd-to-human`, `human-to-smpl`
 - `pcd-to-ply`, `npz-to-quat`, `npz-to-obj`, `quat-to-unity`, `unity-to-label`
+- `run-cmcf`, `map-cmcf-prototypes`

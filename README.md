@@ -1,10 +1,13 @@
 # scan2sim
 
 LiDAR point cloud 기반 사람 추출/추론/라벨링을 위한 실행 프로젝트입니다.  
-현재 `scan2sim`은 세 가지 경로를 지원합니다.
+현재 `scan2sim`은 네 가지 경로를 지원합니다.
 - LiveHPS 기반 SMPL 파이프라인 (`../LiveHPS` 필요)
 - PointNet++ 기반 feature-only 15-head 분류 파이프라인
 - Rule-based parser-decoder 파이프라인 (10개 body-part + relation features)
+- CMCF(Canonical Marker Correspondence Field) 파이프라인
+  - canonical marker ID를 유지한 marker transport
+  - Euler/quat/SMPL 복원 없이 marker-group relation으로 12-head 라벨 디코딩
 
 ## 1) Requirements
 - OS: Linux (WSL 포함)
@@ -42,6 +45,8 @@ python -m scripts run-feature-pipeline --help
 python -m scripts run-feature --help
 python -m scripts run-parser-pipeline --help
 python -m scripts run-parser-decoder --help
+python -m scripts run-cmcf-pipeline --help
+python -m scripts cmcf-map --help
 python -m scripts.pc.extract_person --help
 python -m scripts.eval.match_one --help
 ```
@@ -182,15 +187,84 @@ python -m scripts.eval.match_one \
   --topk 3
 ```
 
-## 9) Path Policy
+## 9) CMCF (Canonical Marker Correspondence Field)
+핵심 정책:
+- canonical 인체에서 marker ID를 1회 정의하고, pose가 바뀌어도 ID를 유지
+- 추론 시 Euler/quat/SMPL 파라미터 복원 없이 marker relation feature만 사용
+- 출력은 12-head 라벨 벡터
+
+1) virtual canonical marker DB + decoder 실행
+```bash
+python -m scripts run-cmcf-pipeline \
+  --input "data/virtual/pdbr_25421_lidar/*.ply" \
+  --input-pattern "*.ply" \
+  --part-config configs/parser/part_parser_rules_virtual.yaml \
+  --marker-config configs/cmcf/marker_field_virtual.yaml \
+  --decoder-config configs/cmcf/decoder_rules_12head.yaml \
+  --viz-dir outputs/cmcf/virtual_pdbr/viz \
+  --viz-write-lines \
+  --output-dir outputs/cmcf/virtual_pdbr
+```
+
+2) real query에 동일 feature 추출 후 prototype 매핑
+```bash
+python -m scripts run-cmcf-pipeline \
+  --input data/real/SQUAT/human \
+  --input-pattern "human_*.ply" \
+  --part-config configs/parser/part_parser_rules_v1.yaml \
+  --marker-config configs/cmcf/marker_field_virtual.yaml \
+  --decoder-config configs/cmcf/decoder_rules_12head.yaml \
+  --viz-dir outputs/cmcf/real_squat/viz \
+  --viz-write-lines \
+  --output-dir outputs/cmcf/real_squat
+
+python -m scripts cmcf-map \
+  --prototype-bank outputs/cmcf/virtual_pdbr/prototype_bank.json \
+  --query outputs/cmcf/real_squat \
+  --query-pattern "cmcf_*.json" \
+  --output outputs/cmcf/real_squat/prototype_mapping.jsonl \
+  --topk 3
+```
+
+3) CMCF 시각화 GUI까지 한 번에 실행(WSL2/X11)
+```bash
+WAYLAND_DISPLAY= DISPLAY=:0 XDG_SESSION_TYPE=x11 \
+python -m scripts run-cmcf-pipeline \
+  --input "data/virtual/pdbr_25421_lidar/*.ply" \
+  --input-pattern "*.ply" \
+  --part-config configs/parser/part_parser_rules_virtual.yaml \
+  --marker-config configs/cmcf/marker_field_virtual.yaml \
+  --decoder-config configs/cmcf/decoder_rules_12head.yaml \
+  --viz-dir outputs/cmcf/virtual_pdbr/viz \
+  --viz-write-lines \
+  --build-playback \
+  --play-gui \
+  --play-fps 2 \
+  --play-loop \
+  --play-log-every 30 \
+  --output-dir outputs/cmcf/virtual_pdbr
+```
+GUI 단축키: `C`(part color↔raw), `B`(part box), `M`(marker), `Space`(재생/정지), `←/→`(프레임), `↑/↓`(점프)
+
+산출물:
+- `canonical_markers.json`: canonical marker field
+- `cmcf_*.json`: 프레임별 marker transport + feature + decoded labels
+- `prototype_bank.json`: virtual pose prototype bank
+- `prototype_mapping.jsonl`: real query의 nearest prototype 결과
+- `cmcf_*.json`의 `visualization.part_color_source`, `visualization.part_box_source`로 CMCF 기준 여부 확인 가능
+- marker 시각화는 `visualization.marker_color_rgb=[1,0,1]` (magenta glyph)로 고정되어 LiDAR 점군과 구분됨
+
+## 10) Path Policy
 - 기본 경로 상수: `scripts/common/io_paths.py`
 - 모든 상대 경로는 `scan2sim/` 루트 기준으로 해석
 - 런타임 산출물:
   - `outputs/`: SMPL/quat/euler/label/obj/feature_models
+  - `outputs/cmcf/`: CMCF canonical/prototype outputs
+  - `outputs/baselines/{livehps,pointnet2,parser_decoder}/`: baseline snapshot outputs
   - `outputs/parser_label/`: parser-decoder 산출물
   - `data/feature/manifest.jsonl`: feature 학습용 샘플 매니페스트
   - `data/match_one/`: 매칭 평가 산출물
 
-## 10) Related Docs
+## 11) Related Docs
 - `docs/PROJECT_STRUCTURE.md`
 - `docs/integration/SCRIPTS.md`

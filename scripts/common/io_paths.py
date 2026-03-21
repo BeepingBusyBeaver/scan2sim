@@ -105,6 +105,27 @@ _define_paths(
 
 _define_paths(
     _SCOPE,
+    (*_OUTPUTS, "cmcf"),
+    {
+        "OUTPUTS_CMCF_DIR": (),
+        "OUTPUTS_CMCF_CANONICAL_JSON": ("canonical_markers.json",),
+        "OUTPUTS_CMCF_PROTOTYPE_BANK_JSON": ("prototype_bank.json",),
+    },
+)
+
+_define_paths(
+    _SCOPE,
+    (*_OUTPUTS, "baselines"),
+    {
+        "OUTPUTS_BASELINES_DIR": (),
+        "OUTPUTS_BASELINES_LIVEHPS_DIR": ("livehps",),
+        "OUTPUTS_BASELINES_POINTNET2_DIR": ("pointnet2",),
+        "OUTPUTS_BASELINES_PARSER_DIR": ("parser_decoder",),
+    },
+)
+
+_define_paths(
+    _SCOPE,
     (*_DATA, "real"),
     {
         "DATA_REAL_DIR": (),
@@ -168,6 +189,8 @@ _define_paths(
         "CONFIG_FEATURE_POINTNET2_YAML": ("feature", "pointnet2_multitask.yaml",),
         "CONFIG_PARSER_PART_RULES_YAML": ("parser", "part_parser_rules.yaml",),
         "CONFIG_PARSER_DECODER_RULES_YAML": ("parser", "label_decoder_rules.yaml",),
+        "CONFIG_CMCF_MARKER_FIELD_YAML": ("cmcf", "marker_field_virtual.yaml",),
+        "CONFIG_CMCF_DECODER_12HEAD_YAML": ("cmcf", "decoder_rules_12head.yaml",),
     },
 )
 
